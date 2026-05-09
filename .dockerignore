@@ -1,6 +1,13 @@
 .git
 .gitignore
 .DS_Store
+.idea
+.deploy
+.history
+.swarm
+.tmp
+.agents
+.context
 
 node_modules
 **/node_modules
@@ -15,6 +22,8 @@ coverage
 .env.*.local
 
 **/*.tsbuildinfo
+*.tgz
+**/*.tgz
 
 .gitnexus
 gitnexus-web/playwright-report

@@ -29,15 +29,34 @@ import { searchFTSFromLbug } from '../core/search/bm25-index.js';
 import { hybridSearch } from '../core/search/hybrid-search.js';
 import { LocalBackend } from '../mcp/local/local-backend.js';
 import { mountMCPEndpoints } from './mcp-http.js';
-import { fork } from 'child_process';
-import { fileURLToPath, pathToFileURL } from 'url';
+import { fileURLToPath } from 'url';
 import { JobManager } from './analyze-job.js';
 import { assertString, escapeRegExp, BadRequestError, createRouteLimiter } from './validation.js';
 import { extractRepoName, getCloneDir, cloneOrPull } from './git-clone.js';
 import { logger, flushLoggerSync } from '../core/logger.js';
+import { buildAnalyzeCommandArgs, runAnalyzeCli } from './analyze-cli.js';
+import { proxyOpenAICompatibleChatCompletions } from './llm-proxy.js';
+import {
+  buildAuthenticatedGitUrl,
+  createAuthStore,
+  getBearerToken,
+  normalizeRepoKey,
+  redactGitUrl,
+  type AuthStore,
+  type AuthUser,
+} from './auth.js';
 
 const _require = createRequire(import.meta.url);
 const pkg = _require('../../package.json');
+
+declare global {
+  namespace Express {
+    interface Request {
+      user?: AuthUser;
+      repoAccessKey?: string;
+    }
+  }
+}
 
 /**
  * Determine whether an HTTP Origin header value is allowed by CORS policy.
@@ -445,8 +464,13 @@ export const streamGraphNdjson = async (
  * Mount an SSE progress endpoint for a JobManager.
  * Handles: initial state, terminal events, heartbeat, event IDs, client disconnect.
  */
-const mountSSEProgress = (app: express.Express, routePath: string, jm: JobManager) => {
-  app.get(routePath, (req, res) => {
+const mountSSEProgress = (
+  app: express.Express,
+  routePath: string,
+  jm: JobManager,
+  ...middlewares: express.RequestHandler[]
+) => {
+  app.get(routePath, ...middlewares, (req, res) => {
     const job = jm.getJob(req.params.jobId);
     if (!job) {
       res.status(404).json({ error: 'Job not found' });
@@ -461,11 +485,9 @@ const mountSSEProgress = (app: express.Express, routePath: string, jm: JobManage
       'X-Accel-Buffering': 'no',
     });
 
-    // Send current state immediately
     eventId++;
     res.write(`id: ${eventId}\ndata: ${JSON.stringify(job.progress)}\n\n`);
 
-    // If already terminal, send event and close
     if (job.status === 'complete' || job.status === 'failed') {
       eventId++;
       res.write(
@@ -478,7 +500,6 @@ const mountSSEProgress = (app: express.Express, routePath: string, jm: JobManage
       return;
     }
 
-    // Heartbeat to detect zombie connections
     const heartbeat = setInterval(() => {
       try {
         res.write(':heartbeat\n\n');
@@ -488,7 +509,6 @@ const mountSSEProgress = (app: express.Express, routePath: string, jm: JobManage
       }
     }, 30_000);
 
-    // Subscribe to progress updates
     const unsubscribe = jm.onProgress(job.id, (progress) => {
       try {
         eventId++;
@@ -538,6 +558,62 @@ const requestedRepo = (req: express.Request): string | undefined => {
   }
 
   return undefined;
+};
+
+const createAuthMiddleware = (authStore: AuthStore) => {
+  const requireAuth: express.RequestHandler = async (req, res, next) => {
+    const token = getBearerToken(req.header('authorization'));
+    if (!token) {
+      res.status(401).json({ error: 'Login required' });
+      return;
+    }
+    const user = await authStore.getSession(token);
+    if (!user) {
+      res.status(401).json({ error: 'Invalid or expired session' });
+      return;
+    }
+    req.user = user;
+    next();
+  };
+
+  const requireAdmin: express.RequestHandler = (req, res, next) => {
+    if (req.user?.role !== 'admin') {
+      res.status(403).json({ error: 'Administrator access required' });
+      return;
+    }
+    next();
+  };
+
+  const requireRepoAccess =
+    (
+      resolveRepoKey: (req: express.Request) => Promise<string | undefined>,
+    ): express.RequestHandler =>
+    async (req, res, next) => {
+      if (!req.user) {
+        res.status(401).json({ error: 'Login required' });
+        return;
+      }
+      let repoKey: string | undefined;
+      try {
+        repoKey = await resolveRepoKey(req);
+      } catch (err) {
+        next(err);
+        return;
+      }
+      if (!repoKey) {
+        next();
+        return;
+      }
+      try {
+        await authStore.assertRepoAccess(req.user.id, repoKey);
+        req.repoAccessKey = normalizeRepoKey(repoKey);
+        next();
+      } catch {
+        res.status(403).json({ error: 'Repository access denied' });
+      }
+    };
+
+  return { requireAuth, requireAdmin, requireRepoAccess };
 };
 
 /**
@@ -681,6 +757,8 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   await backend.init();
   const cleanupMcp = mountMCPEndpoints(app, backend);
   const jobManager = new JobManager();
+  const authStore = await createAuthStore();
+  const { requireAuth, requireAdmin, requireRepoAccess } = createAuthMiddleware(authStore);
 
   // Shared repo lock — prevents concurrent analyze + embed on the same repo path,
   // which would corrupt LadybugDB (analyze calls closeLbug + initLbug while embed has queries in flight).
@@ -778,6 +856,11 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
     return found;
   };
 
+  const resolveRequestedRepoKey = async (req: express.Request): Promise<string | undefined> => {
+    const entry = await resolveRepo(requestedRepo(req), false, req);
+    return entry?.remoteUrl ?? entry?.path;
+  };
+
   // Lightweight healthcheck for Docker/orchestrator probes (#1147).
   // Returns immediately so container managers do not confuse a long-lived
   // SSE stream with an unhealthy server.
@@ -821,29 +904,85 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
     } else {
       launchContext = 'global';
     }
-    res.json({ version: pkg.version, launchContext, nodeVersion: process.version });
+    res.json({
+      version: pkg.version,
+      launchContext,
+      nodeVersion: process.version,
+    });
   });
 
+  app.post('/api/auth/login', createRouteLimiter({ limit: 20 }), async (req, res) => {
+    const username = typeof req.body?.username === 'string' ? req.body.username : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const user = await authStore.verifyPassword(username, password);
+    if (!user) {
+      res.status(401).json({ error: 'Invalid username or password' });
+      return;
+    }
+    const session = await authStore.createSession(user.id);
+    res.json({ token: session.token, expiresAt: session.expiresAt, user });
+  });
+
+  app.post('/api/auth/logout', requireAuth, async (req, res) => {
+    const token = getBearerToken(req.header('authorization'));
+    if (token) await authStore.deleteSession(token);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/auth/me', requireAuth, (req, res) => {
+    res.json({ user: req.user });
+  });
+
+  app.get('/api/ai-settings', requireAuth, requireAdmin, async (_req, res) => {
+    res.json(await authStore.getAiSettings());
+  });
+
+  app.put('/api/ai-settings', requireAuth, requireAdmin, async (req, res) => {
+    await authStore.saveAiSettings(req.body ?? {});
+    res.json({ ok: true });
+  });
+
+  app.post(
+    '/api/llm/openai-compatible/chat/completions',
+    requireAuth,
+    createRouteLimiter({ limit: 120 }),
+    proxyOpenAICompatibleChatCompletions,
+  );
+
   // List all registered repos
-  app.get('/api/repos', async (_req, res) => {
+  app.get('/api/repos', requireAuth, async (req, res) => {
     try {
       const repos = await listRegisteredRepos();
-      res.json(
-        repos.map((r) => ({
-          name: r.name,
-          path: r.path,
-          indexedAt: r.indexedAt,
-          lastCommit: r.lastCommit,
-          stats: r.stats,
-        })),
-      );
+      const visible = [];
+      for (const r of repos) {
+        const accessKeys = [r.remoteUrl, r.path].filter(Boolean) as string[];
+        let canAccess = false;
+        for (const key of accessKeys) {
+          if (req.user?.id && (await authStore.userCanAccessRepo(req.user.id, key))) {
+            canAccess = true;
+            break;
+          }
+        }
+        if (canAccess) {
+          visible.push({
+            name: r.name,
+            path: r.path,
+            indexedAt: r.indexedAt,
+            lastCommit: r.lastCommit,
+            stats: r.stats,
+          });
+        }
+      }
+      res.json(visible);
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to list repos' });
     }
   });
 
+  const repoAccess = requireRepoAccess(resolveRequestedRepoKey);
+
   // Get repo info
-  app.get('/api/repo', async (req, res) => {
+  app.get('/api/repo', requireAuth, repoAccess, async (req, res) => {
     try {
       const entry = await resolveRepo(requestedRepo(req), false, req);
       if (!entry) {
@@ -873,7 +1012,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   // Rate-limited (CodeQL js/missing-rate-limiting): destructive operation
   // doing fs.rm of clone + storage dirs. Default 60 rpm/IP is generous for
   // delete; tighten if abuse is observed.
-  app.delete('/api/repo', createRouteLimiter(), async (req, res) => {
+  app.delete('/api/repo', requireAuth, repoAccess, createRouteLimiter(), async (req, res) => {
     try {
       const repoName = requestedRepo(req);
       if (!repoName) {
@@ -943,7 +1082,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // Get full graph
-  app.get('/api/graph', async (req, res) => {
+  app.get('/api/graph', requireAuth, repoAccess, async (req, res) => {
     try {
       const entry = await resolveRepo(requestedRepo(req));
       if (!entry) {
@@ -1010,7 +1149,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // Execute Cypher query
-  app.post('/api/query', async (req, res) => {
+  app.post('/api/query', requireAuth, repoAccess, async (req, res) => {
     try {
       const cypher = req.body.cypher as string;
       if (!cypher) {
@@ -1037,7 +1176,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // Search (supports mode: 'hybrid' | 'semantic' | 'bm25', and optional enrichment)
-  app.post('/api/search', async (req, res) => {
+  app.post('/api/search', requireAuth, repoAccess, async (req, res) => {
     try {
       const query = (req.body.query ?? '').trim();
       if (!query) {
@@ -1110,7 +1249,11 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           searchResults.slice(0, limit).map(async (r: any) => {
             const nodeId: string = r.nodeId || r.id || '';
             const nodeLabel = nodeId.split(':')[0];
-            const enrichment: { connections?: any; cluster?: string; processes?: any[] } = {};
+            const enrichment: {
+              connections?: any;
+              cluster?: string;
+              processes?: any[];
+            } = {};
 
             if (!nodeId || !validLabel(nodeLabel)) return { ...r, ...enrichment };
 
@@ -1196,7 +1339,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
 
   // Read file — with path traversal guard
   // Rate-limited (CodeQL js/missing-rate-limiting): per-request fs.readFile.
-  app.get('/api/file', createRouteLimiter(), async (req, res) => {
+  app.get('/api/file', requireAuth, repoAccess, createRouteLimiter(), async (req, res) => {
     const entry = await resolveRepo(requestedRepo(req));
     if (!entry) {
       res.status(404).json({ error: 'Repository not found' });
@@ -1210,7 +1353,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   // Rate-limited (CodeQL js/missing-rate-limiting): scans every file in
   // the indexed repo per request — heaviest I/O endpoint. Same default 60
   // rpm/IP for now; consider tightening if real-world load shows abuse.
-  app.get('/api/grep', createRouteLimiter(), async (req, res) => {
+  app.get('/api/grep', requireAuth, repoAccess, createRouteLimiter(), async (req, res) => {
     try {
       const entry = await resolveRepo(requestedRepo(req));
       if (!entry) {
@@ -1286,7 +1429,11 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
         for (let i = 0; i < lines.length; i++) {
           if (results.length >= limit) break;
           if (regex.test(lines[i])) {
-            results.push({ filePath, line: i + 1, text: lines[i].trim().slice(0, 200) });
+            results.push({
+              filePath,
+              line: i + 1,
+              text: lines[i].trim().slice(0, 200),
+            });
           }
           regex.lastIndex = 0;
         }
@@ -1299,7 +1446,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // List all processes
-  app.get('/api/processes', async (req, res) => {
+  app.get('/api/processes', requireAuth, repoAccess, async (req, res) => {
     try {
       const result = await backend.queryProcesses(requestedRepo(req));
       res.json(result);
@@ -1309,7 +1456,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // Process detail
-  app.get('/api/process', async (req, res) => {
+  app.get('/api/process', requireAuth, repoAccess, async (req, res) => {
     try {
       const name = String(req.query.name ?? '').trim();
       if (!name) {
@@ -1331,7 +1478,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // List all clusters
-  app.get('/api/clusters', async (req, res) => {
+  app.get('/api/clusters', requireAuth, repoAccess, async (req, res) => {
     try {
       const result = await backend.queryClusters(requestedRepo(req));
       res.json(result);
@@ -1341,7 +1488,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // Cluster detail
-  app.get('/api/cluster', async (req, res) => {
+  app.get('/api/cluster', requireAuth, repoAccess, async (req, res) => {
     try {
       const name = String(req.query.name ?? '').trim();
       if (!name) {
@@ -1365,9 +1512,17 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   // ── Analyze API ──────────────────────────────────────────────────────
 
   // POST /api/analyze — start a new analysis job
-  app.post('/api/analyze', createRouteLimiter({ limit: 10 }), async (req, res) => {
+  app.post('/api/analyze', requireAuth, createRouteLimiter({ limit: 10 }), async (req, res) => {
     try {
-      const { url: repoUrl, path: repoLocalPath, force, embeddings, dropEmbeddings } = req.body;
+      const {
+        url: repoUrl,
+        path: repoLocalPath,
+        force,
+        embeddings,
+        dropEmbeddings,
+        gitToken,
+        serverKey,
+      } = req.body;
 
       // Input type validation
       if (repoUrl !== undefined && typeof repoUrl !== 'string') {
@@ -1376,6 +1531,14 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
       }
       if (repoLocalPath !== undefined && typeof repoLocalPath !== 'string') {
         res.status(400).json({ error: '"path" must be a string' });
+        return;
+      }
+      if (gitToken !== undefined && typeof gitToken !== 'string') {
+        res.status(400).json({ error: '"gitToken" must be a string' });
+        return;
+      }
+      if (serverKey !== undefined && typeof serverKey !== 'string') {
+        res.status(400).json({ error: '"serverKey" must be a string' });
         return;
       }
 
@@ -1415,18 +1578,32 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           if (repoUrl && !repoLocalPath) {
             const repoName = extractRepoName(repoUrl);
             targetPath = getCloneDir(repoName);
+            const cloneUrl = buildAuthenticatedGitUrl(repoUrl, gitToken, serverKey);
 
             jobManager.updateJob(job.id, {
               status: 'cloning',
               repoName,
-              progress: { phase: 'cloning', percent: 0, message: `Cloning ${repoUrl}...` },
+              progress: {
+                phase: 'cloning',
+                percent: 0,
+                message: `Cloning ${redactGitUrl(repoUrl)}...`,
+              },
             });
 
-            await cloneOrPull(repoUrl, targetPath, (progress) => {
-              jobManager.updateJob(job.id, {
-                progress: { phase: progress.phase, percent: 5, message: progress.message },
-              });
-            });
+            await cloneOrPull(
+              cloneUrl,
+              targetPath,
+              (progress) => {
+                jobManager.updateJob(job.id, {
+                  progress: {
+                    phase: progress.phase,
+                    percent: 5,
+                    message: progress.message.replace(cloneUrl, redactGitUrl(repoUrl)),
+                  },
+                });
+              },
+              { depth: Number(process.env.GITNEXUS_CLONE_DEPTH ?? '1') },
+            );
           }
 
           if (!targetPath) {
@@ -1437,139 +1614,64 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
           const analyzeLockKey = getStoragePath(targetPath);
           const lockErr = acquireRepoLock(analyzeLockKey);
           if (lockErr) {
-            jobManager.updateJob(job.id, { status: 'failed', error: lockErr });
+            jobManager.updateJob(job.id, {
+              status: 'failed',
+              error: lockErr,
+            });
             return;
           }
 
-          jobManager.updateJob(job.id, { repoPath: targetPath, status: 'analyzing' });
+          jobManager.updateJob(job.id, {
+            repoPath: targetPath,
+            status: 'analyzing',
+          });
+          if (req.user) {
+            await authStore.grantRepoAccess(
+              req.user.id,
+              repoUrl ? normalizeRepoKey(repoUrl) : targetPath,
+            );
+            await authStore.grantRepoAccess(req.user.id, targetPath);
+          }
 
-          // ── Worker fork with auto-retry ──────────────────────────────
-          //
-          // Forks a child process with 8GB heap. If the worker crashes
-          // (OOM, native addon segfault, etc.), it retries up to
-          // MAX_WORKER_RETRIES times with exponential backoff before
-          // marking the job as permanently failed.
-          //
-          // In dev mode (tsx), registers the tsx ESM hook via a file://
-          // URL so the child can compile TypeScript on-the-fly.
+          const cliArgs = buildAnalyzeCommandArgs(targetPath, {
+            force: !!force,
+            embeddings: !!embeddings,
+            dropEmbeddings: !!dropEmbeddings,
+          });
+          logger.info({ command: ['node', ...cliArgs] }, 'Running analyze command after clone');
 
-          const MAX_WORKER_RETRIES = 2;
-          const callerPath = fileURLToPath(import.meta.url);
-          const isDev = callerPath.endsWith('.ts');
-          const workerFile = isDev ? 'analyze-worker.ts' : 'analyze-worker.js';
-          const workerPath = path.join(path.dirname(callerPath), workerFile);
-          const tsxHookArgs: string[] = isDev
-            ? ['--import', pathToFileURL(_require.resolve('tsx/esm')).href]
-            : [];
+          const analyzeProcess = runAnalyzeCli(targetPath, {
+            force: !!force,
+            embeddings: !!embeddings,
+            dropEmbeddings: !!dropEmbeddings,
+          });
+          jobManager.registerChild(job.id, analyzeProcess.child);
+          analyzeProcess.events.on('progress', (progress) => {
+            if (progress.percent < 0) {
+              const current = jobManager.getJob(job.id);
+              progress.percent = current?.progress.percent ?? 10;
+            }
+            jobManager.updateJob(job.id, { status: 'analyzing', progress });
+          });
 
-          const forkWorker = () => {
-            const currentJob = jobManager.getJob(job.id);
-            if (!currentJob || currentJob.status === 'complete' || currentJob.status === 'failed')
-              return;
-
-            const child = fork(workerPath, [], {
-              execArgv: [...tsxHookArgs, '--max-old-space-size=8192'],
-              stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+          try {
+            await analyzeProcess.completion;
+            releaseRepoLock(analyzeLockKey);
+            await backend.init();
+            jobManager.updateJob(job.id, {
+              status: 'complete',
+              repoName: path.basename(targetPath),
             });
-
-            // Capture stderr for crash diagnostics
-            let stderrChunks = '';
-            child.stderr?.on('data', (chunk: Buffer) => {
-              stderrChunks += chunk.toString();
-              if (stderrChunks.length > 4096) stderrChunks = stderrChunks.slice(-4096);
-            });
-
-            child.on('message', (msg: any) => {
-              if (msg.type === 'progress') {
-                jobManager.updateJob(job.id, {
-                  status: 'analyzing',
-                  progress: { phase: msg.phase, percent: msg.percent, message: msg.message },
-                });
-              } else if (msg.type === 'complete') {
-                releaseRepoLock(analyzeLockKey);
-                // Reinitialize backend BEFORE marking complete — ensures the new
-                // repo is queryable when the client receives the SSE complete event.
-                backend
-                  .init()
-                  .then(() => {
-                    jobManager.updateJob(job.id, {
-                      status: 'complete',
-                      repoName: msg.result.repoName,
-                    });
-                  })
-                  .catch((err) => {
-                    logger.error({ err }, 'backend.init() failed after analyze:');
-                    jobManager.updateJob(job.id, {
-                      status: 'failed',
-                      error: 'Server failed to reload after analysis. Try again.',
-                    });
-                  });
-              } else if (msg.type === 'error') {
-                releaseRepoLock(analyzeLockKey);
-                jobManager.updateJob(job.id, {
-                  status: 'failed',
-                  error: msg.message,
-                });
-              }
-            });
-
-            child.on('error', (err) => {
-              releaseRepoLock(analyzeLockKey);
+          } catch (err: any) {
+            releaseRepoLock(analyzeLockKey);
+            const current = jobManager.getJob(job.id);
+            if (!current || current.status !== 'failed') {
               jobManager.updateJob(job.id, {
                 status: 'failed',
-                error: `Worker process error: ${err.message}`,
+                error: err.message || 'Analysis failed',
               });
-            });
-
-            child.on('exit', (code) => {
-              const j = jobManager.getJob(job.id);
-              if (!j || j.status === 'complete' || j.status === 'failed') return;
-
-              // Worker crashed — attempt retry if under the limit
-              if (j.retryCount < MAX_WORKER_RETRIES) {
-                j.retryCount++;
-                const delay = 1000 * Math.pow(2, j.retryCount - 1); // 1s, 2s
-                const lastErr = stderrChunks.trim().split('\n').pop() || '';
-                logger.warn(
-                  `Analyze worker crashed (code ${code}), retry ${j.retryCount}/${MAX_WORKER_RETRIES} in ${delay}ms` +
-                    (lastErr ? `: ${lastErr}` : ''),
-                );
-                jobManager.updateJob(job.id, {
-                  status: 'analyzing',
-                  progress: {
-                    phase: 'retrying',
-                    percent: j.progress.percent,
-                    message: `Worker crashed, retrying (${j.retryCount}/${MAX_WORKER_RETRIES})...`,
-                  },
-                });
-                stderrChunks = '';
-                setTimeout(forkWorker, delay);
-              } else {
-                // Exhausted retries — permanent failure
-                releaseRepoLock(analyzeLockKey);
-                jobManager.updateJob(job.id, {
-                  status: 'failed',
-                  error: `Worker crashed ${MAX_WORKER_RETRIES + 1} times (code ${code})${stderrChunks ? ': ' + stderrChunks.trim().split('\n').pop() : ''}`,
-                });
-              }
-            });
-
-            // Register child for cancellation + timeout tracking
-            jobManager.registerChild(job.id, child);
-
-            // Send start command to child
-            child.send({
-              type: 'start',
-              repoPath: targetPath,
-              options: {
-                force: !!force,
-                embeddings: !!embeddings,
-                dropEmbeddings: !!dropEmbeddings,
-              },
-            });
-          };
-
-          forkWorker();
+            }
+          }
         } catch (err: any) {
           if (targetPath) releaseRepoLock(getStoragePath(targetPath));
           jobManager.updateJob(job.id, {
@@ -1590,7 +1692,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // GET /api/analyze/:jobId — poll job status
-  app.get('/api/analyze/:jobId', (req, res) => {
+  app.get('/api/analyze/:jobId', requireAuth, (req, res) => {
     const job = jobManager.getJob(req.params.jobId);
     if (!job) {
       res.status(404).json({ error: 'Job not found' });
@@ -1610,10 +1712,10 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // GET /api/analyze/:jobId/progress — SSE stream (shared helper)
-  mountSSEProgress(app, '/api/analyze/:jobId/progress', jobManager);
+  mountSSEProgress(app, '/api/analyze/:jobId/progress', jobManager, requireAuth);
 
   // DELETE /api/analyze/:jobId — cancel a running analysis job
-  app.delete('/api/analyze/:jobId', (req, res) => {
+  app.delete('/api/analyze/:jobId', requireAuth, (req, res) => {
     const job = jobManager.getJob(req.params.jobId);
     if (!job) {
       res.status(404).json({ error: 'Job not found' });
@@ -1632,125 +1734,137 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   const embedJobManager = new JobManager();
 
   // POST /api/embed — trigger server-side embedding generation
-  app.post('/api/embed', createRouteLimiter({ limit: 20 }), async (req, res) => {
-    try {
-      const entry = await resolveRepo(requestedRepo(req));
-      if (!entry) {
-        res.status(404).json({ error: 'Repository not found' });
-        return;
-      }
-
-      // Check shared repo lock — prevent concurrent analyze + embed on same repo
-      const repoLockPath = entry.storagePath;
-      const lockErr = acquireRepoLock(repoLockPath);
-      if (lockErr) {
-        res.status(409).json({ error: lockErr });
-        return;
-      }
-
-      const job = embedJobManager.createJob({ repoPath: entry.storagePath });
-      embedJobManager.updateJob(job.id, {
-        repoName: entry.name,
-        status: 'analyzing' as any,
-        progress: { phase: 'analyzing', percent: 0, message: 'Starting embedding generation...' },
-      });
-
-      // 30-minute timeout for embedding jobs (same as analyze jobs)
-      const EMBED_TIMEOUT_MS = 30 * 60 * 1000;
-      const embedTimeout = setTimeout(() => {
-        const current = embedJobManager.getJob(job.id);
-        if (current && current.status !== 'complete' && current.status !== 'failed') {
-          releaseRepoLock(repoLockPath);
-          embedJobManager.updateJob(job.id, {
-            status: 'failed',
-            error: 'Embedding timed out (30 minute limit)',
-          });
+  app.post(
+    '/api/embed',
+    requireAuth,
+    repoAccess,
+    createRouteLimiter({ limit: 20 }),
+    async (req, res) => {
+      try {
+        const entry = await resolveRepo(requestedRepo(req));
+        if (!entry) {
+          res.status(404).json({ error: 'Repository not found' });
+          return;
         }
-      }, EMBED_TIMEOUT_MS);
 
-      // Run embedding pipeline asynchronously
-      (async () => {
-        try {
-          const lbugPath = path.join(entry.storagePath, 'lbug');
-          await withLbugDb(lbugPath, async () => {
-            const { runEmbeddingPipeline } =
-              await import('../core/embeddings/embedding-pipeline.js');
-            // Fetch existing content hashes for incremental embedding.
-            // Delegated to lbug-adapter which owns the DB query logic and legacy-fallback handling.
-            const { fetchExistingEmbeddingHashes } = await import('../core/lbug/lbug-adapter.js');
-            const existingEmbeddings = await fetchExistingEmbeddingHashes(executeQuery);
-            if (existingEmbeddings && existingEmbeddings.size > 0) {
-              console.log(
-                `[embed] ${existingEmbeddings.size} nodes already embedded — incremental run with content-hash comparison`,
-              );
-            }
-            await runEmbeddingPipeline(
-              executeQuery,
-              executeWithReusedStatement,
-              (p) => {
-                embedJobManager.updateJob(job.id, {
-                  progress: {
-                    phase:
-                      p.phase === 'ready' ? 'complete' : p.phase === 'error' ? 'failed' : p.phase,
-                    percent: p.percent,
-                    message:
-                      p.phase === 'loading-model'
-                        ? 'Loading embedding model...'
-                        : p.phase === 'embedding'
-                          ? `Embedding nodes (${p.percent}%)...`
-                          : p.phase === 'indexing'
-                            ? 'Creating vector index...'
-                            : p.phase === 'ready'
-                              ? 'Embeddings complete'
-                              : `${p.phase} (${p.percent}%)`,
-                  },
-                });
-              },
-              {}, // config: use defaults
-              undefined, // skipNodeIds
-              undefined, // context
-              existingEmbeddings,
-            );
+        // Check shared repo lock — prevent concurrent analyze + embed on same repo
+        const repoLockPath = entry.storagePath;
+        const lockErr = acquireRepoLock(repoLockPath);
+        if (lockErr) {
+          res.status(409).json({ error: lockErr });
+          return;
+        }
 
-            // Flush WAL so subsequent /api/search requests see the new
-            // embeddings immediately (#1149). In the CLI path closeLbug()
-            // handles this during process exit, but the server keeps the
-            // connection open for other routes — a CHECKPOINT is enough.
-            await flushWAL();
-          });
+        const job = embedJobManager.createJob({ repoPath: entry.storagePath });
+        embedJobManager.updateJob(job.id, {
+          repoName: entry.name,
+          status: 'analyzing' as any,
+          progress: {
+            phase: 'analyzing',
+            percent: 0,
+            message: 'Starting embedding generation...',
+          },
+        });
 
-          clearTimeout(embedTimeout);
-          releaseRepoLock(repoLockPath);
-          // Don't overwrite 'failed' if the job was cancelled while the pipeline was running
+        // 30-minute timeout for embedding jobs (same as analyze jobs)
+        const EMBED_TIMEOUT_MS = 30 * 60 * 1000;
+        const embedTimeout = setTimeout(() => {
           const current = embedJobManager.getJob(job.id);
-          if (!current || current.status !== 'failed') {
-            embedJobManager.updateJob(job.id, { status: 'complete' });
-          }
-        } catch (err: any) {
-          clearTimeout(embedTimeout);
-          releaseRepoLock(repoLockPath);
-          const current = embedJobManager.getJob(job.id);
-          if (!current || current.status !== 'failed') {
+          if (current && current.status !== 'complete' && current.status !== 'failed') {
+            releaseRepoLock(repoLockPath);
             embedJobManager.updateJob(job.id, {
               status: 'failed',
-              error: err.message || 'Embedding generation failed',
+              error: 'Embedding timed out (30 minute limit)',
             });
           }
-        }
-      })();
+        }, EMBED_TIMEOUT_MS);
 
-      res.status(202).json({ jobId: job.id, status: 'analyzing' });
-    } catch (err: any) {
-      if (err.message?.includes('already in progress')) {
-        res.status(409).json({ error: err.message });
-      } else {
-        res.status(500).json({ error: err.message || 'Failed to start embedding generation' });
+        // Run embedding pipeline asynchronously
+        (async () => {
+          try {
+            const lbugPath = path.join(entry.storagePath, 'lbug');
+            await withLbugDb(lbugPath, async () => {
+              const { runEmbeddingPipeline } =
+                await import('../core/embeddings/embedding-pipeline.js');
+              // Fetch existing content hashes for incremental embedding.
+              // Delegated to lbug-adapter which owns the DB query logic and legacy-fallback handling.
+              const { fetchExistingEmbeddingHashes } = await import('../core/lbug/lbug-adapter.js');
+              const existingEmbeddings = await fetchExistingEmbeddingHashes(executeQuery);
+              if (existingEmbeddings && existingEmbeddings.size > 0) {
+                console.log(
+                  `[embed] ${existingEmbeddings.size} nodes already embedded — incremental run with content-hash comparison`,
+                );
+              }
+              await runEmbeddingPipeline(
+                executeQuery,
+                executeWithReusedStatement,
+                (p) => {
+                  embedJobManager.updateJob(job.id, {
+                    progress: {
+                      phase:
+                        p.phase === 'ready' ? 'complete' : p.phase === 'error' ? 'failed' : p.phase,
+                      percent: p.percent,
+                      message:
+                        p.phase === 'loading-model'
+                          ? 'Loading embedding model...'
+                          : p.phase === 'embedding'
+                            ? `Embedding nodes (${p.percent}%)...`
+                            : p.phase === 'indexing'
+                              ? 'Creating vector index...'
+                              : p.phase === 'ready'
+                                ? 'Embeddings complete'
+                                : `${p.phase} (${p.percent}%)`,
+                    },
+                  });
+                },
+                {}, // config: use defaults
+                undefined, // skipNodeIds
+                undefined, // context
+                existingEmbeddings,
+              );
+
+              // Flush WAL so subsequent /api/search requests see the new
+              // embeddings immediately (#1149). In the CLI path closeLbug()
+              // handles this during process exit, but the server keeps the
+              // connection open for other routes — a CHECKPOINT is enough.
+              await flushWAL();
+            });
+
+            clearTimeout(embedTimeout);
+            releaseRepoLock(repoLockPath);
+            // Don't overwrite 'failed' if the job was cancelled while the pipeline was running
+            const current = embedJobManager.getJob(job.id);
+            if (!current || current.status !== 'failed') {
+              embedJobManager.updateJob(job.id, { status: 'complete' });
+            }
+          } catch (err: any) {
+            clearTimeout(embedTimeout);
+            releaseRepoLock(repoLockPath);
+            const current = embedJobManager.getJob(job.id);
+            if (!current || current.status !== 'failed') {
+              embedJobManager.updateJob(job.id, {
+                status: 'failed',
+                error: err.message || 'Embedding generation failed',
+              });
+            }
+          }
+        })();
+
+        res.status(202).json({ jobId: job.id, status: 'analyzing' });
+      } catch (err: any) {
+        if (err.message?.includes('already in progress')) {
+          res.status(409).json({ error: err.message });
+        } else {
+          res.status(500).json({
+            error: err.message || 'Failed to start embedding generation',
+          });
+        }
       }
-    }
-  });
+    },
+  );
 
   // GET /api/embed/:jobId — poll embedding job status
-  app.get('/api/embed/:jobId', (req, res) => {
+  app.get('/api/embed/:jobId', requireAuth, (req, res) => {
     const job = embedJobManager.getJob(req.params.jobId);
     if (!job) {
       res.status(404).json({ error: 'Job not found' });
@@ -1768,10 +1882,10 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   });
 
   // GET /api/embed/:jobId/progress — SSE stream (shared helper)
-  mountSSEProgress(app, '/api/embed/:jobId/progress', embedJobManager);
+  mountSSEProgress(app, '/api/embed/:jobId/progress', embedJobManager, requireAuth);
 
   // DELETE /api/embed/:jobId — cancel embedding job
-  app.delete('/api/embed/:jobId', (req, res) => {
+  app.delete('/api/embed/:jobId', requireAuth, (req, res) => {
     const job = embedJobManager.getJob(req.params.jobId);
     if (!job) {
       res.status(404).json({ error: 'Job not found' });
@@ -1820,6 +1934,7 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
       server.close();
       jobManager.dispose();
       embedJobManager.dispose();
+      await authStore.close();
       await cleanupMcp();
       await closeLbug();
       await backend.disconnect();

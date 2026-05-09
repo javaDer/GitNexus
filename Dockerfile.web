@@ -1,12 +1,25 @@
+# syntax=docker/dockerfile:1.7
+
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
+ARG NODE_IMAGE=node:22-alpine
+ARG NPM_REGISTRY=https://registry.npmmirror.com/
+ARG VITE_GITNEXUS_BACKEND_URL=http://localhost:4747
 
-FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
+FROM ${NODE_IMAGE} AS builder
+
+ARG NPM_REGISTRY
+ARG VITE_GITNEXUS_BACKEND_URL
 
 WORKDIR /app
 
+ENV npm_config_audit=false \
+    npm_config_fund=false \
+    npm_config_registry=${NPM_REGISTRY} \
+    VITE_GITNEXUS_BACKEND_URL=${VITE_GITNEXUS_BACKEND_URL}
+
 COPY gitnexus-shared/package.json gitnexus-shared/package-lock.json ./gitnexus-shared/
-RUN npm ci --prefix gitnexus-shared
+RUN --mount=type=cache,target=/root/.npm npm ci --prefix gitnexus-shared
 
 COPY gitnexus-shared ./gitnexus-shared
 RUN npm run build --prefix gitnexus-shared
@@ -14,12 +27,12 @@ RUN npm run build --prefix gitnexus-shared
 COPY gitnexus/package.json ./gitnexus/
 
 COPY gitnexus-web/package.json gitnexus-web/package-lock.json ./gitnexus-web/
-RUN npm ci --prefix gitnexus-web
+RUN --mount=type=cache,target=/root/.npm npm ci --prefix gitnexus-web
 
 COPY gitnexus-web ./gitnexus-web
 RUN npm run build --prefix gitnexus-web
 
-FROM node:22-alpine AS runtime
+FROM ${NODE_IMAGE} AS runtime
 
 RUN apk add --no-cache curl
 

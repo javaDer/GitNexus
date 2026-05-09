@@ -2,7 +2,7 @@
  * RepoAnalyzer
  *
  * Two input modes:
- *   - "github"  → GitHub URL (https://github.com/owner/repo)
+ *   - "github"  → HTTP(S) Git URL
  *   - "local"   → Select a local folder via the browser's native directory picker
  */
 
@@ -28,11 +28,11 @@ import { AnalyzeProgress } from './AnalyzeProgress';
 
 type InputMode = 'github' | 'local';
 
-const GITHUB_RE = /^https?:\/\/(www\.)?github\.com\/[^/\s]+\/[^/\s]+/i;
+const GIT_HTTP_RE = /^https?:\/\/[^/\s]+\/[^/\s]+\/[^/\s]+/i;
 const IS_WINDOWS = navigator.userAgent.toLowerCase().includes('win');
 
 function isValidGithubUrl(value: string): boolean {
-  return GITHUB_RE.test(value.trim());
+  return GIT_HTTP_RE.test(value.trim());
 }
 
 // ── Mode tabs ────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ function ModeTabs({ mode, onChange }: { mode: InputMode; onChange: (m: InputMode
         } `}
       >
         <Github className="h-3 w-3" />
-        GitHub URL
+        Git URL
       </button>
       <button
         role="tab"
@@ -138,6 +138,8 @@ export const RepoAnalyzer = ({ variant, onComplete, onCancel }: RepoAnalyzerProp
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<InputMode>('github');
   const [githubUrl, setGithubUrl] = useState('');
+  const [gitToken, setGitToken] = useState('');
+  const [serverKey, setServerKey] = useState('');
   const [localPath, setLocalPath] = useState('');
   const [phase, setPhase] = useState<InternalPhase>('input');
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -179,7 +181,7 @@ export const RepoAnalyzer = ({ variant, onComplete, onCancel }: RepoAnalyzerProp
 
   const handleAnalyze = async () => {
     if (mode === 'github' && !isValidGithubUrl(githubUrl)) {
-      setValidationError('Please enter a valid GitHub repository URL.');
+      setValidationError('Please enter a valid HTTP(S) Git repository URL.');
       return;
     }
     if (mode === 'local' && localPath.trim().length < 2) {
@@ -191,7 +193,14 @@ export const RepoAnalyzer = ({ variant, onComplete, onCancel }: RepoAnalyzerProp
     setPhase('starting');
 
     try {
-      const request = mode === 'github' ? { url: githubUrl.trim() } : { path: localPath.trim() };
+      const request =
+        mode === 'github'
+          ? {
+              url: githubUrl.trim(),
+              gitToken: gitToken.trim() || undefined,
+              serverKey: serverKey.trim() || undefined,
+            }
+          : { path: localPath.trim() };
       const { jobId } = await startAnalyze(request);
       jobIdRef.current = jobId;
       setPhase('analyzing');
@@ -245,14 +254,14 @@ export const RepoAnalyzer = ({ variant, onComplete, onCancel }: RepoAnalyzerProp
       {/* Mode tabs */}
       {showInput && <ModeTabs mode={mode} onChange={handleModeChange} />}
 
-      {/* GitHub URL input */}
+      {/* Git URL input */}
       {showInput && mode === 'github' && (
         <div className="space-y-2">
           <label
             htmlFor={inputId}
             className="block text-xs font-medium tracking-wider text-text-secondary uppercase"
           >
-            GitHub Repository URL
+            Git Repository URL
           </label>
           <div
             className={`flex items-center gap-3 rounded-xl border bg-void px-4 py-3.5 transition-all duration-200 ${
@@ -279,7 +288,7 @@ export const RepoAnalyzer = ({ variant, onComplete, onCancel }: RepoAnalyzerProp
                 }
               }}
               disabled={isLoading}
-              placeholder="https://github.com/owner/repo"
+              placeholder="https://code.geelib.qihoo.net:11443/tob-ai/openclaw-websocket.git"
               autoComplete="url"
               spellCheck={false}
               className="flex-1 border-none bg-transparent font-mono text-sm text-text-primary outline-none placeholder:text-text-muted disabled:opacity-50"
@@ -294,6 +303,22 @@ export const RepoAnalyzer = ({ variant, onComplete, onCancel }: RepoAnalyzerProp
               </div>
             )}
           </div>
+          <input
+            type="password"
+            value={gitToken}
+            onChange={(e) => setGitToken(e.target.value)}
+            placeholder="Personal access token"
+            autoComplete="off"
+            className="w-full rounded-xl border border-border-default bg-void px-4 py-3 font-mono text-sm text-text-primary outline-none placeholder:text-text-muted focus:border-accent/40"
+          />
+          <input
+            type="password"
+            value={serverKey}
+            onChange={(e) => setServerKey(e.target.value)}
+            placeholder="Server authorization key"
+            autoComplete="off"
+            className="w-full rounded-xl border border-border-default bg-void px-4 py-3 font-mono text-sm text-text-primary outline-none placeholder:text-text-muted focus:border-accent/40"
+          />
         </div>
       )}
 

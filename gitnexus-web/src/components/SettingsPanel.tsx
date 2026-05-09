@@ -31,6 +31,7 @@ interface SettingsPanelProps {
   backendUrl?: string;
   isBackendConnected?: boolean;
   onBackendUrlChange?: (url: string) => void;
+  isAdmin?: boolean;
 }
 
 /**
@@ -247,6 +248,7 @@ export const SettingsPanel = ({
   backendUrl,
   isBackendConnected,
   onBackendUrlChange,
+  isAdmin = false,
 }: SettingsPanelProps) => {
   const [settings, setSettings] = useState<LLMSettings>(loadSettings);
   const [showApiKey, setShowApiKey] = useState<Record<string, boolean>>({});
@@ -328,6 +330,28 @@ export const SettingsPanel = ({
   };
 
   if (!isOpen) return null;
+
+  if (!isAdmin) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+        <div className="relative mx-4 w-full max-w-sm rounded-2xl border border-border-subtle bg-surface p-6 shadow-2xl">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-text-primary">AI Settings</h2>
+            <button
+              onClick={onClose}
+              className="rounded-lg p-2 text-text-muted transition-colors hover:bg-hover hover:text-text-primary"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+          <p className="text-sm text-text-secondary">
+            Administrator access is required to configure model providers.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const providers: LLMProvider[] = [
     'openai',

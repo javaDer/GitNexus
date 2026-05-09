@@ -28,7 +28,9 @@ export interface UseBackendResult {
 export function useBackend(): UseBackendResult {
   const [backendUrl] = useState<string>(() => {
     try {
-      return localStorage.getItem(LS_URL_KEY) ?? DEFAULT_BACKEND_URL;
+      return DEFAULT_BACKEND_URL !== 'http://localhost:4747'
+        ? DEFAULT_BACKEND_URL
+        : (localStorage.getItem(LS_URL_KEY) ?? DEFAULT_BACKEND_URL);
     } catch {
       return DEFAULT_BACKEND_URL;
     }

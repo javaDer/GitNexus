@@ -7,12 +7,13 @@
 
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { SystemMessage } from '@langchain/core/messages';
-import { ChatOpenAI, AzureChatOpenAI } from '@langchain/openai';
+import { ChatOpenAICompletions, AzureChatOpenAI } from '@langchain/openai';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatOllama } from '@langchain/ollama';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { createGraphRAGTools, type GraphRAGBackend } from './tools';
+import { getAuthToken, getBackendUrl } from '../../services/backend-client';
 import type {
   ProviderConfig,
   OpenAIConfig,
@@ -27,6 +28,31 @@ import type {
 } from './types';
 import { type CodebaseContext, buildDynamicSystemPrompt } from './context-builder';
 import { DEFAULT_OLLAMA_BASE_URL, DEFAULT_OPENROUTER_BASE_URL } from '../../config/ui-constants';
+
+const normalizeOptionalUrl = (value?: string): string | undefined => {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/\/+$/, '');
+};
+
+const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const DEFAULT_GLM_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
+
+const buildOpenAICompatibleProxyConfig = (providerApiKey: string, providerBaseUrl: string) => {
+  const authToken = getAuthToken();
+  if (!authToken) {
+    throw new Error('GitNexus login is required to proxy OpenAI-compatible LLM requests');
+  }
+
+  return {
+    apiKey: authToken,
+    baseURL: `${getBackendUrl()}/api/llm/openai-compatible`,
+    defaultHeaders: {
+      'x-gitnexus-llm-api-key': providerApiKey,
+      'x-gitnexus-llm-base-url': providerBaseUrl,
+    },
+  };
+};
 
 /**
  * System prompt for the Graph RAG agent
@@ -128,22 +154,23 @@ export const createChatModel = (config: ProviderConfig): BaseChatModel => {
   switch (config.provider) {
     case 'openai': {
       const openaiConfig = config as OpenAIConfig;
+      const baseURL = normalizeOptionalUrl(openaiConfig.baseUrl) ?? DEFAULT_OPENAI_BASE_URL;
 
       if (!openaiConfig.apiKey || openaiConfig.apiKey.trim() === '') {
         throw new Error('OpenAI API key is required but was not provided');
       }
 
-      return new ChatOpenAI({
-        apiKey: openaiConfig.apiKey,
+      const proxyConfig = buildOpenAICompatibleProxyConfig(openaiConfig.apiKey, baseURL);
+      const fields = {
+        apiKey: proxyConfig.apiKey,
         modelName: openaiConfig.model,
         temperature: openaiConfig.temperature ?? 0.1,
         maxTokens: openaiConfig.maxTokens,
-        configuration: {
-          apiKey: openaiConfig.apiKey,
-          ...(openaiConfig.baseUrl ? { baseURL: openaiConfig.baseUrl } : {}),
-        },
+        configuration: proxyConfig,
         streaming: true,
-      });
+      };
+
+      return new ChatOpenAICompletions(fields);
     }
 
     case 'azure-openai': {
@@ -197,6 +224,7 @@ export const createChatModel = (config: ProviderConfig): BaseChatModel => {
 
     case 'openrouter': {
       const openRouterConfig = config as OpenRouterConfig;
+      const baseURL = normalizeOptionalUrl(openRouterConfig.baseUrl) ?? DEFAULT_OPENROUTER_BASE_URL;
 
       // Debug logging
       if (import.meta.env.DEV) {
@@ -211,16 +239,15 @@ export const createChatModel = (config: ProviderConfig): BaseChatModel => {
         throw new Error('OpenRouter API key is required but was not provided');
       }
 
-      return new ChatOpenAI({
-        openAIApiKey: openRouterConfig.apiKey,
-        apiKey: openRouterConfig.apiKey, // Fallback for some versions
+      const proxyConfig = buildOpenAICompatibleProxyConfig(openRouterConfig.apiKey, baseURL);
+
+      return new ChatOpenAICompletions({
+        openAIApiKey: proxyConfig.apiKey,
+        apiKey: proxyConfig.apiKey,
         modelName: openRouterConfig.model,
         temperature: openRouterConfig.temperature ?? 0.1,
         maxTokens: openRouterConfig.maxTokens,
-        configuration: {
-          apiKey: openRouterConfig.apiKey, // Ensure client receives it
-          baseURL: openRouterConfig.baseUrl ?? DEFAULT_OPENROUTER_BASE_URL,
-        },
+        configuration: proxyConfig,
         streaming: true,
       });
     }
@@ -246,20 +273,20 @@ export const createChatModel = (config: ProviderConfig): BaseChatModel => {
 
     case 'glm': {
       const glmConfig = config as GLMConfig;
+      const baseURL = normalizeOptionalUrl(glmConfig.baseUrl) ?? DEFAULT_GLM_BASE_URL;
 
       if (!glmConfig.apiKey || glmConfig.apiKey.trim() === '') {
         throw new Error('GLM API key is required but was not provided');
       }
 
-      return new ChatOpenAI({
-        apiKey: glmConfig.apiKey,
+      const proxyConfig = buildOpenAICompatibleProxyConfig(glmConfig.apiKey, baseURL);
+
+      return new ChatOpenAICompletions({
+        apiKey: proxyConfig.apiKey,
         modelName: glmConfig.model,
         temperature: glmConfig.temperature ?? 0.1,
         maxTokens: glmConfig.maxTokens,
-        configuration: {
-          apiKey: glmConfig.apiKey,
-          baseURL: glmConfig.baseUrl ?? 'https://api.z.ai/api/coding/paas/v4',
-        },
+        configuration: proxyConfig,
         streaming: true,
       });
     }

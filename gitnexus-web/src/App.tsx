@@ -6,6 +6,7 @@ import { Header } from './components/Header';
 import { GraphCanvas, GraphCanvasHandle } from './components/GraphCanvas';
 import { RightPanel } from './components/RightPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { LoginPage } from './components/LoginPage';
 import { StatusBar } from './components/StatusBar';
 import { FileTreePanel } from './components/FileTreePanel';
 import { CodeReferencesPanel } from './components/CodeReferencesPanel';
@@ -17,6 +18,7 @@ import {
   normalizeServerUrl,
   connectHeartbeat,
   BackendError,
+  setAuthToken,
   type ConnectResult,
   type BackendRepo,
 } from './services/backend-client';
@@ -45,10 +47,28 @@ const AppContent = () => {
     setAvailableRepos,
     switchRepo,
     setCurrentRepo,
+    currentUser,
+    setCurrentUser,
   } = useAppState();
 
   const graphCanvasRef = useRef<GraphCanvasHandle>(null);
   const [serverDisconnected, setServerDisconnected] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
+
+  useEffect(() => {
+    const token = sessionStorage.getItem('gitnexus-auth-token');
+    const rawUser = sessionStorage.getItem('gitnexus-auth-user');
+    if (token && rawUser) {
+      try {
+        setAuthToken(token);
+        setCurrentUser(JSON.parse(rawUser));
+      } catch {
+        sessionStorage.removeItem('gitnexus-auth-user');
+        setAuthToken(null);
+      }
+    }
+    setAuthReady(true);
+  }, [setCurrentUser]);
 
   const handleServerConnect = useCallback(
     async (result: ConnectResult): Promise<void> => {
@@ -210,6 +230,22 @@ const AppContent = () => {
   }, [viewMode]);
 
   // Render based on view mode
+  if (!authReady) return null;
+
+  if (!currentUser) {
+    return (
+      <LoginPage
+        onLogin={(user, serverUrl, token) => {
+          sessionStorage.setItem('gitnexus-auth-token', token);
+          sessionStorage.setItem('gitnexus-auth-user', JSON.stringify(user));
+          setAuthToken(token);
+          setCurrentUser(user);
+          setServerBaseUrl(serverUrl);
+        }}
+      />
+    );
+  }
+
   if (viewMode === 'onboarding') {
     return (
       <DropZone
@@ -308,6 +344,7 @@ const AppContent = () => {
         isOpen={isSettingsPanelOpen}
         onClose={() => setSettingsPanelOpen(false)}
         onSettingsSaved={handleSettingsSaved}
+        isAdmin={currentUser.role === 'admin'}
       />
     </div>
   );

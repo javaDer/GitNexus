@@ -3,7 +3,7 @@
  *
  * The "empty state" card rendered inside DropZone's Crossfade when the server
  * is connected but zero repos are indexed. Replaces the generic error message
- * with a first-class GitHub URL input flow.
+ * with a first-class Git URL input flow.
  *
  * Rendering context:
  *   DropZone (Crossfade, phase="analyze")
@@ -50,8 +50,8 @@ export const AnalyzeOnboarding = ({ onComplete }: AnalyzeOnboardingProps) => {
             Analyze your first repository
           </h2>
           <p className="mx-auto mt-1.5 max-w-xs text-sm leading-relaxed text-text-secondary">
-            Paste a GitHub URL and GitNexus will clone it, parse the code, and build a live
-            knowledge graph — right in your browser.
+            Paste a public or private Git URL and GitNexus will clone it, parse the code, and build
+            a live knowledge graph — right in your browser.
           </p>
         </div>
       </div>
@@ -63,7 +63,7 @@ export const AnalyzeOnboarding = ({ onComplete }: AnalyzeOnboardingProps) => {
 
       {/* Footer hint */}
       <p className="mt-5 text-center text-[11px] leading-relaxed text-text-muted">
-        Public repos only &middot; Cloned locally by the server &middot; No data leaves your machine
+        Private repos supported &middot; Cloned locally by the server &middot; No data leaves your machine
       </p>
     </div>
   );

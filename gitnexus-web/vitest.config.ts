@@ -10,6 +10,7 @@ export default defineConfig({
   plugins: [react()],
   define: {
     __REQUIRED_NODE_VERSION__: JSON.stringify(gitnexusPkg.engines.node.replace(/[>=^~\s]/g, '')),
+    'import.meta.env.VITE_GITNEXUS_BACKEND_URL': JSON.stringify('https://backend.example.test'),
   },
   resolve: {
     alias: {

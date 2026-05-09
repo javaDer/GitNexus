@@ -6,6 +6,7 @@ import {
   cloneOrPull,
   buildCloneArgs,
   normalizeGitUrlForCompare,
+  stripGitUrlCredentials,
   assertRemoteMatchesRequestedUrl,
   getRemoteOriginUrl,
 } from '../../src/server/git-clone.js';
@@ -296,6 +297,38 @@ describe('git-clone', () => {
       expect(args[depthIdx + 1]).toBe('1');
       // --depth must be before the `--` separator (it's an option, not a positional).
       expect(depthIdx).toBeLessThan(args.indexOf('--'));
+    });
+
+    it('uses a configurable clone depth for private hosts that reject shallow clones', () => {
+      expect(
+        buildCloneArgs(
+          'https://code.geelib.qihoo.net:11443/tob-ai/openclaw-websocket.git',
+          '/safe/target',
+          0,
+        ),
+      ).toEqual([
+        'clone',
+        '--',
+        'https://code.geelib.qihoo.net:11443/tob-ai/openclaw-websocket.git',
+        '/safe/target',
+      ]);
+      expect(
+        buildCloneArgs(
+          'https://code.geelib.qihoo.net:11443/tob-ai/openclaw-websocket.git',
+          '/safe/target',
+          50,
+        ),
+      ).toContain('50');
+    });
+  });
+
+  describe('stripGitUrlCredentials', () => {
+    it('removes injected private clone credentials before persisting remotes', () => {
+      expect(
+        stripGitUrlCredentials(
+          'https://oauth2:personal-token@code.geelib.qihoo.net:11443/tob-ai/openclaw-websocket.git',
+        ),
+      ).toBe('https://code.geelib.qihoo.net:11443/tob-ai/openclaw-websocket.git');
     });
   });
 

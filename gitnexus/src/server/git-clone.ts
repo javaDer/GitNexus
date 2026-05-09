@@ -238,8 +238,13 @@ export interface CloneProgress {
  *
  * Exported so the separator placement is testable without mocking spawn.
  */
-export function buildCloneArgs(url: string, targetDir: string): string[] {
-  return ['clone', '--depth', '1', '--', url, targetDir];
+export function buildCloneArgs(url: string, targetDir: string, depth = 1): string[] {
+  const args = ['clone'];
+  if (depth > 0) {
+    args.push('--depth', String(depth));
+  }
+  args.push('--', url, targetDir);
+  return args;
 }
 
 /**
@@ -290,6 +295,17 @@ export function normalizeGitUrlForCompare(url: string): string {
     // is best-effort; exact-string compare is sufficient for the threat
     // model (mismatched origins still differ at the literal level).
     return trimmed.toLowerCase();
+  }
+}
+
+export function stripGitUrlCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString();
+  } catch {
+    return url.replace(/\/\/[^/@]+@/, '//');
   }
 }
 
@@ -345,9 +361,13 @@ export async function assertRemoteMatchesRequestedUrl(
   if (remoteUrl === null) {
     throw new Error(`Existing clone at ${targetDir} has no remote.origin — refusing to pull`);
   }
-  if (normalizeGitUrlForCompare(remoteUrl) !== normalizeGitUrlForCompare(requestedUrl)) {
+  const requestedUrlWithoutCredentials = stripGitUrlCredentials(requestedUrl);
+  if (
+    normalizeGitUrlForCompare(remoteUrl) !==
+    normalizeGitUrlForCompare(requestedUrlWithoutCredentials)
+  ) {
     throw new Error(
-      `Existing clone at ${targetDir} has remote ${remoteUrl}, not the requested URL ${requestedUrl}`,
+      `Existing clone at ${targetDir} has remote ${remoteUrl}, not the requested URL ${requestedUrlWithoutCredentials}`,
     );
   }
 }
@@ -380,6 +400,7 @@ export async function cloneOrPull(
   url: string,
   targetDir: string,
   onProgress?: (progress: CloneProgress) => void,
+  options?: { depth?: number },
 ): Promise<string> {
   // Containment barrier — inline with the canonical path.relative idiom so
   // CodeQL recognizes the sanitizer at every following filesystem and
@@ -418,7 +439,11 @@ export async function cloneOrPull(
   } else {
     await fs.mkdir(path.dirname(safeTarget), { recursive: true });
     onProgress?.({ phase: 'cloning', message: `Cloning ${url}...` });
-    await runGit(buildCloneArgs(url, safeTarget));
+    await runGit(buildCloneArgs(url, safeTarget, options?.depth ?? 1));
+    const urlWithoutCredentials = stripGitUrlCredentials(url);
+    if (urlWithoutCredentials !== url) {
+      await runGit(['remote', 'set-url', 'origin', urlWithoutCredentials], safeTarget);
+    }
   }
 
   return safeTarget;

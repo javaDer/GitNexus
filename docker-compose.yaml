@@ -7,6 +7,13 @@ services:
     # built-in default works without any reconfiguration.
     ports:
       - '${SERVER_HOST_PORT:-4747}:4747'
+    environment:
+      GITNEXUS_HOME: /data/gitnexus
+      GITNEXUS_ANALYZE_CLI_PATH: /app/gitnexus/dist/cli/index.js
+      GITNEXUS_ADMIN_USERNAME: ${GITNEXUS_ADMIN_USERNAME:-admin}
+      GITNEXUS_ADMIN_PASSWORD: ${GITNEXUS_ADMIN_PASSWORD:-admin}
+      GITNEXUS_SESSION_SECRET: ${GITNEXUS_SESSION_SECRET:-dev-only-change-me}
+      GITNEXUS_CLONE_DEPTH: ${GITNEXUS_CLONE_DEPTH:-1}
     volumes:
       # Persist the global registry, indexes, and cloned repos across runs.
       - gitnexus-data:/data/gitnexus

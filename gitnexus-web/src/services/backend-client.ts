@@ -25,6 +25,14 @@ export interface BackendRepo {
   };
 }
 
+export type UserRole = 'admin' | 'user';
+
+export interface AuthUser {
+  id?: number;
+  username: string;
+  role: UserRole;
+}
+
 export interface EnrichedSearchResult {
   filePath: string;
   score: number;
@@ -41,7 +49,12 @@ export interface EnrichedSearchResult {
     incoming: Array<{ name: string; type: string; confidence?: number }>;
   };
   cluster?: string;
-  processes?: Array<{ id: string; label: string; step?: number; stepCount?: number }>;
+  processes?: Array<{
+    id: string;
+    label: string;
+    step?: number;
+    stepCount?: number;
+  }>;
 }
 
 export interface GrepResult {
@@ -120,8 +133,14 @@ export function streamSSE<T = unknown>(url: string, handlers: SSEHandlers<T>): A
         if (lastEventId) {
           headers['Last-Event-ID'] = lastEventId;
         }
+        if (_authToken) {
+          headers.Authorization = `Bearer ${_authToken}`;
+        }
 
-        const response = await fetch(url, { signal: controller.signal, headers });
+        const response = await fetch(url, {
+          signal: controller.signal,
+          headers,
+        });
         if (!response.ok) {
           handlers.onError?.(`Server returned ${response.status}`);
           return;
@@ -202,13 +221,23 @@ export function streamSSE<T = unknown>(url: string, handlers: SSEHandlers<T>): A
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
-let _backendUrl = 'http://localhost:4747';
+export const getDefaultBackendUrl = (): string =>
+  import.meta.env.VITE_GITNEXUS_BACKEND_URL || 'http://localhost:4747';
+
+let _backendUrl = getDefaultBackendUrl();
+let _authToken: string | null = null;
 
 export const setBackendUrl = (url: string): void => {
   _backendUrl = url.replace(/\/$/, '');
 };
 
 export const getBackendUrl = (): string => _backendUrl;
+
+export const setAuthToken = (token: string | null): void => {
+  _authToken = token;
+};
+
+export const getAuthToken = (): string | null => _authToken;
 
 /**
  * Normalize a user-entered server URL into a base URL suitable for setBackendUrl().
@@ -251,7 +280,15 @@ const fetchWithTimeout = async (
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
+    const headers = new Headers(init.headers);
+    if (_authToken && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${_authToken}`);
+    }
+    const response = await fetch(url, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
     return response;
   } catch (error: unknown) {
     if (error instanceof DOMException && error.name === 'AbortError') {
@@ -335,6 +372,40 @@ export const fetchServerInfo = async (): Promise<ServerInfo> => {
   const response = await fetchWithTimeout(`${_backendUrl}/api/info`);
   await assertOk(response);
   return response.json() as Promise<ServerInfo>;
+};
+
+export const login = async (
+  username: string,
+  password: string,
+): Promise<{ token: string; user: AuthUser; expiresAt: number }> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  await assertOk(response);
+  const data = (await response.json()) as {
+    token: string;
+    user: AuthUser;
+    expiresAt: number;
+  };
+  setAuthToken(data.token);
+  return data;
+};
+
+export const logout = async (): Promise<void> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/auth/logout`, {
+    method: 'POST',
+  });
+  await assertOk(response);
+  setAuthToken(null);
+};
+
+export const fetchCurrentUser = async (): Promise<AuthUser> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/auth/me`);
+  await assertOk(response);
+  const data = (await response.json()) as { user: AuthUser };
+  return data.user;
 };
 
 /**
@@ -466,7 +537,10 @@ export const fetchGraph = async (
   }
 
   if (!opts?.onProgress || !response.body) {
-    return response.json() as Promise<{ nodes: GraphNode[]; relationships: GraphRelationship[] }>;
+    return response.json() as Promise<{
+      nodes: GraphNode[];
+      relationships: GraphRelationship[];
+    }>;
   }
 
   // Streaming download with progress
@@ -571,7 +645,12 @@ export const runQuery = async (
 /** Search with optional enrichment and mode selection. */
 export const search = async (
   query: string,
-  opts?: { limit?: number; mode?: 'hybrid' | 'semantic' | 'bm25'; enrich?: boolean; repo?: string },
+  opts?: {
+    limit?: number;
+    mode?: 'hybrid' | 'semantic' | 'bm25';
+    enrich?: boolean;
+    repo?: string;
+  },
 ): Promise<EnrichedSearchResult[]> => {
   const response = await fetchWithTimeout(`${_backendUrl}/api/search`, {
     method: 'POST',
@@ -678,6 +757,8 @@ export const startAnalyze = async (request: {
   path?: string;
   force?: boolean;
   embeddings?: boolean;
+  gitToken?: string;
+  serverKey?: string;
 }): Promise<{ jobId: string; status: string }> => {
   const response = await fetchWithTimeout(
     `${_backendUrl}/api/analyze`,
@@ -798,7 +879,9 @@ export async function connectToServer(
   setBackendUrl(baseUrl);
 
   onProgress?.('validating', 0, null);
-  const repoInfo = await fetchRepoInfo(repoName, { awaitAnalysis: opts?.awaitAnalysis });
+  const repoInfo = await fetchRepoInfo(repoName, {
+    awaitAnalysis: opts?.awaitAnalysis,
+  });
 
   onProgress?.('downloading', 0, null);
   const { nodes, relationships } = await fetchGraph(repoName, {

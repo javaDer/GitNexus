@@ -229,23 +229,59 @@ describe('production routes — rate-limit middleware wiring', () => {
   });
 
   it('GET /api/file is wired with createRouteLimiter', () => {
-    expect(apiSource).toMatch(/app\.get\('\/api\/file',\s*createRouteLimiter\(/);
+    expect(apiSource).toMatch(/app\.get\('\/api\/file',[\s\S]*createRouteLimiter\(/);
   });
 
   it('GET /api/grep is wired with createRouteLimiter', () => {
-    expect(apiSource).toMatch(/app\.get\('\/api\/grep',\s*createRouteLimiter\(/);
+    expect(apiSource).toMatch(/app\.get\('\/api\/grep',[\s\S]*createRouteLimiter\(/);
   });
 
   it('DELETE /api/repo is wired with createRouteLimiter', () => {
-    expect(apiSource).toMatch(/app\.delete\('\/api\/repo',\s*createRouteLimiter\(/);
+    expect(apiSource).toMatch(/app\.delete\('\/api\/repo',[\s\S]*createRouteLimiter\(/);
   });
 
   it('POST /api/analyze is wired with createRouteLimiter', () => {
-    expect(apiSource).toMatch(/app\.post\('\/api\/analyze',\s*createRouteLimiter\(/);
+    expect(apiSource).toMatch(/app\.post\('\/api\/analyze',[\s\S]*createRouteLimiter\(/);
   });
 
   it('POST /api/embed is wired with createRouteLimiter', () => {
-    expect(apiSource).toMatch(/app\.post\('\/api\/embed',\s*createRouteLimiter\(/);
+    expect(apiSource).toMatch(/app\.post\(\s*'\/api\/embed',[\s\S]*createRouteLimiter\(/);
+  });
+
+  it('auth endpoints are wired before repository data routes', () => {
+    expect(apiSource).toMatch(/app\.post\('\/api\/auth\/login',\s*createRouteLimiter\(/);
+    expect(apiSource).toMatch(/app\.post\('\/api\/auth\/logout',\s*requireAuth,/);
+    expect(apiSource).toMatch(/app\.get\('\/api\/auth\/me',\s*requireAuth,/);
+  });
+
+  it('repository data routes require authentication and per-repo access', () => {
+    expect(apiSource).toMatch(/app\.get\('\/api\/repos',\s*requireAuth,/);
+    expect(apiSource).toMatch(/const repoAccess = requireRepoAccess\(resolveRequestedRepoKey\)/);
+    expect(apiSource).toMatch(/return entry\?\.remoteUrl \?\? entry\?\.path/);
+    expect(apiSource).toMatch(/app\.get\('\/api\/repo',\s*requireAuth,\s*repoAccess,/);
+    expect(apiSource).toMatch(/app\.get\('\/api\/graph',\s*requireAuth,\s*repoAccess,/);
+    expect(apiSource).toMatch(/app\.post\('\/api\/query',\s*requireAuth,\s*repoAccess,/);
+    expect(apiSource).toMatch(/app\.post\('\/api\/search',\s*requireAuth,\s*repoAccess,/);
+    expect(apiSource).toMatch(/app\.get\('\/api\/file',\s*requireAuth,\s*repoAccess,/);
+    expect(apiSource).toMatch(/app\.get\('\/api\/grep',\s*requireAuth,\s*repoAccess,/);
+  });
+
+  it('admin-only routes are protected with requireAdmin', () => {
+    expect(apiSource).toMatch(/app\.get\('\/api\/ai-settings',\s*requireAuth,\s*requireAdmin,/);
+    expect(apiSource).toMatch(/app\.put\('\/api\/ai-settings',\s*requireAuth,\s*requireAdmin,/);
+  });
+
+  it('analysis and embedding job inspection routes require authentication', () => {
+    expect(apiSource).toMatch(/app\.get\('\/api\/analyze\/:jobId',\s*requireAuth,/);
+    expect(apiSource).toMatch(
+      /mountSSEProgress\(app,\s*'\/api\/analyze\/:jobId\/progress',\s*jobManager,\s*requireAuth\)/,
+    );
+    expect(apiSource).toMatch(/app\.delete\('\/api\/analyze\/:jobId',\s*requireAuth,/);
+    expect(apiSource).toMatch(/app\.get\('\/api\/embed\/:jobId',\s*requireAuth,/);
+    expect(apiSource).toMatch(
+      /mountSSEProgress\(app,\s*'\/api\/embed\/:jobId\/progress',\s*embedJobManager,\s*requireAuth\)/,
+    );
+    expect(apiSource).toMatch(/app\.delete\('\/api\/embed\/:jobId',\s*requireAuth,/);
   });
 
   it('SPA fallback is wired with createRouteLimiter', () => {

@@ -33,6 +33,7 @@ import {
   type BackendRepo,
   type ConnectResult,
   type JobProgress,
+  type AuthUser,
 } from '../services/backend-client';
 import { ERROR_RESET_DELAY_MS } from '../config/ui-constants';
 import { normalizePath } from '../lib/path-resolution';
@@ -163,6 +164,8 @@ interface AppState {
   isEmbeddingReady: boolean;
 
   // LLM/Agent state
+  currentUser: AuthUser | null;
+  setCurrentUser: (user: AuthUser | null) => void;
   llmSettings: LLMSettings;
   updateLLMSettings: (updates: Partial<LLMSettings>) => void;
   isSettingsPanelOpen: boolean;
@@ -327,6 +330,7 @@ const AppStateProviderInner = ({ children }: { children: ReactNode }) => {
   } | null>(null);
 
   // LLM/Agent state
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [llmSettings, setLLMSettings] = useState<LLMSettings>(loadSettings);
   const [isSettingsPanelOpen, setSettingsPanelOpen] = useState(false);
   const [isAgentReady, setIsAgentReady] = useState(false);
@@ -1267,6 +1271,8 @@ const AppStateProviderInner = ({ children }: { children: ReactNode }) => {
     semanticSearchWithContext,
     isEmbeddingReady: embeddingStatus === 'ready',
     // LLM/Agent state
+    currentUser,
+    setCurrentUser,
     llmSettings,
     updateLLMSettings,
     isSettingsPanelOpen,
