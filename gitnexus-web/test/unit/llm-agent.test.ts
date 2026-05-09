@@ -46,6 +46,7 @@ describe('createChatModel', () => {
       'https://backend.example.test/api/llm/openai-compatible',
     );
     expect(fields.clientConfig?.apiKey).toBe('session-token');
+    expect(fields.clientConfig?.maxRetries).toBe(0);
     expect(fields.clientConfig?.defaultHeaders?.['x-gitnexus-llm-base-url']).toBe(
       'https://llm.example.com/v1',
     );
@@ -104,5 +105,23 @@ describe('createChatModel', () => {
     };
 
     expect(() => createChatModel(config)).toThrow(/GitNexus login is required/);
+  });
+
+  it('trims model names before sending OpenAI-compatible requests', () => {
+    setBackendUrl('https://backend.example.test');
+    setAuthToken('session-token');
+
+    const config: OpenAIConfig = {
+      provider: 'openai',
+      apiKey: 'sk-test',
+      model: ' 360-deepseek-v4-flash（抢鲜）',
+      baseUrl: 'https://code.jizhi.360.cn/v1',
+    };
+
+    const model = createChatModel(config);
+
+    expect(getModelFields(model).invocationParams({}).model).toBe(
+      '360-deepseek-v4-flash（抢鲜）',
+    );
   });
 });

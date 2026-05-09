@@ -4,6 +4,7 @@ import {
   getOpenAICompatibleProxyConfig,
   LLM_PROXY_API_KEY_HEADER,
   LLM_PROXY_BASE_URL_HEADER,
+  normalizeOpenAICompatibleRequestBody,
   normalizeOpenAICompatibleBaseUrl,
 } from '../../src/server/llm-proxy.js';
 
@@ -36,5 +37,17 @@ describe('OpenAI-compatible LLM proxy helpers', () => {
         [LLM_PROXY_BASE_URL_HEADER]: 'https://llm.example.com/v1',
       }),
     ).toThrow(/API key/);
+  });
+
+  it('trims model names before forwarding request bodies', () => {
+    expect(
+      normalizeOpenAICompatibleRequestBody({
+        model: ' 360-deepseek-v4-flash（抢鲜）',
+        stream: true,
+      }),
+    ).toEqual({
+      model: '360-deepseek-v4-flash（抢鲜）',
+      stream: true,
+    });
   });
 });

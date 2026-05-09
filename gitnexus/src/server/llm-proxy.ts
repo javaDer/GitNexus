@@ -42,6 +42,18 @@ export const normalizeOpenAICompatibleBaseUrl = (input: string): string => {
 export const buildOpenAICompatibleChatCompletionsUrl = (baseUrl: string): string =>
   `${normalizeOpenAICompatibleBaseUrl(baseUrl)}/chat/completions`;
 
+export const normalizeOpenAICompatibleRequestBody = (body: unknown): unknown => {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return body ?? {};
+  }
+
+  const normalized: Record<string, unknown> = { ...(body as Record<string, unknown>) };
+  if (typeof normalized.model === 'string') {
+    normalized.model = normalized.model.trim();
+  }
+  return normalized;
+};
+
 export const getOpenAICompatibleProxyConfig = (
   headers: express.Request['headers'],
 ): OpenAICompatibleProxyConfig => {
@@ -79,7 +91,7 @@ export const proxyOpenAICompatibleChatCompletions: express.RequestHandler = asyn
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
       },
-      body: JSON.stringify(req.body ?? {}),
+      body: JSON.stringify(normalizeOpenAICompatibleRequestBody(req.body)),
     });
 
     res.status(upstream.status);

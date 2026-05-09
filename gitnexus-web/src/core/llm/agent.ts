@@ -35,6 +35,14 @@ const normalizeOptionalUrl = (value?: string): string | undefined => {
   return trimmed.replace(/\/+$/, '');
 };
 
+const normalizeModelName = (value: string): string => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error('Model name is required but was not provided');
+  }
+  return trimmed;
+};
+
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_GLM_BASE_URL = 'https://api.z.ai/api/coding/paas/v4';
 
@@ -47,6 +55,7 @@ const buildOpenAICompatibleProxyConfig = (providerApiKey: string, providerBaseUr
   return {
     apiKey: authToken,
     baseURL: `${getBackendUrl()}/api/llm/openai-compatible`,
+    maxRetries: 0,
     defaultHeaders: {
       'x-gitnexus-llm-api-key': providerApiKey,
       'x-gitnexus-llm-base-url': providerBaseUrl,
@@ -163,7 +172,7 @@ export const createChatModel = (config: ProviderConfig): BaseChatModel => {
       const proxyConfig = buildOpenAICompatibleProxyConfig(openaiConfig.apiKey, baseURL);
       const fields = {
         apiKey: proxyConfig.apiKey,
-        modelName: openaiConfig.model,
+        modelName: normalizeModelName(openaiConfig.model),
         temperature: openaiConfig.temperature ?? 0.1,
         maxTokens: openaiConfig.maxTokens,
         configuration: proxyConfig,
@@ -244,7 +253,7 @@ export const createChatModel = (config: ProviderConfig): BaseChatModel => {
       return new ChatOpenAICompletions({
         openAIApiKey: proxyConfig.apiKey,
         apiKey: proxyConfig.apiKey,
-        modelName: openRouterConfig.model,
+        modelName: normalizeModelName(openRouterConfig.model),
         temperature: openRouterConfig.temperature ?? 0.1,
         maxTokens: openRouterConfig.maxTokens,
         configuration: proxyConfig,
@@ -283,7 +292,7 @@ export const createChatModel = (config: ProviderConfig): BaseChatModel => {
 
       return new ChatOpenAICompletions({
         apiKey: proxyConfig.apiKey,
-        modelName: glmConfig.model,
+        modelName: normalizeModelName(glmConfig.model),
         temperature: glmConfig.temperature ?? 0.1,
         maxTokens: glmConfig.maxTokens,
         configuration: proxyConfig,
