@@ -1,6 +1,9 @@
 import { createServer } from '../server/api.js';
 import { logger, flushLoggerSync } from '../core/logger.js';
 import { cliError } from './cli-message.js';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 // Catch anything that would cause a silent exit. Pino v10's default
 // destination is `sync: false` (SonicBoom buffered) — call

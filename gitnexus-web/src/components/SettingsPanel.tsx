@@ -23,6 +23,9 @@ import {
 import type { LLMSettings, LLMProvider } from '../core/llm/types';
 import { DEFAULT_OLLAMA_BASE_URL } from '../config/ui-constants';
 import { ProviderConfigCard } from './settings/ProviderConfigCard';
+import { PersonalTokensPanel } from './PersonalTokensPanel';
+import { AdminAccessPanel } from './AdminAccessPanel';
+import { fetchAuthCapabilities, type AuthCapabilities } from '../services/backend-client';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -260,6 +263,7 @@ export const SettingsPanel = ({
   // OpenRouter models state
   const [openRouterModels, setOpenRouterModels] = useState<Array<{ id: string; name: string }>>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [capabilities, setCapabilities] = useState<AuthCapabilities | null>(null);
 
   // Clean up save timer on unmount
   useEffect(() => {
@@ -276,6 +280,9 @@ export const SettingsPanel = ({
       setSettings(loadSettings());
       setSaveStatus('idle');
       setOllamaError(null);
+      fetchAuthCapabilities()
+        .then(setCapabilities)
+        .catch(() => setCapabilities(null));
     }
   }, [isOpen]);
 
@@ -337,7 +344,7 @@ export const SettingsPanel = ({
         <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
         <div className="relative mx-4 w-full max-w-sm rounded-2xl border border-border-subtle bg-surface p-6 shadow-2xl">
           <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-text-primary">AI Settings</h2>
+            <h2 className="text-lg font-semibold text-text-primary">Settings</h2>
             <button
               onClick={onClose}
               className="rounded-lg p-2 text-text-muted transition-colors hover:bg-hover hover:text-text-primary"
@@ -348,6 +355,7 @@ export const SettingsPanel = ({
           <p className="text-sm text-text-secondary">
             Administrator access is required to configure model providers.
           </p>
+          <PersonalTokensPanel capabilities={capabilities} />
         </div>
       </div>
     );
@@ -392,6 +400,9 @@ export const SettingsPanel = ({
 
         {/* Content */}
         <div className="flex-1 space-y-6 overflow-y-auto p-6">
+          <PersonalTokensPanel capabilities={capabilities} />
+          <AdminAccessPanel capabilities={capabilities} />
+
           {/* Local Server */}
           {backendUrl !== undefined && onBackendUrlChange && (
             <div className="space-y-3">

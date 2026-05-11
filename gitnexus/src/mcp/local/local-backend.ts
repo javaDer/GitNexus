@@ -211,6 +211,16 @@ interface RepoHandle {
   stats?: RegistryEntry['stats'];
 }
 
+export interface RepoAccessFilterInput {
+  name: string;
+  path: string;
+  remoteUrl?: string;
+}
+
+export interface LocalBackendOptions {
+  canAccessRepo?: (repo: RepoAccessFilterInput) => Promise<boolean> | boolean;
+}
+
 export class LocalBackend {
   private repos: Map<string, RepoHandle> = new Map();
   private contextCache: Map<string, CodebaseContext> = new Map();
@@ -233,6 +243,18 @@ export class LocalBackend {
    * stderr noisy per DoD §2.8.
    */
   private warnedVectorUnsupported = false;
+
+  constructor(private readonly options: LocalBackendOptions = {}) {}
+
+  withAccessFilter(canAccessRepo: LocalBackendOptions['canAccessRepo']): LocalBackend {
+    const child = new LocalBackend({ canAccessRepo });
+    child.repos = this.repos;
+    child.contextCache = this.contextCache;
+    child.initializedRepos = this.initializedRepos;
+    child.reinitPromises = this.reinitPromises;
+    child.lastStalenessCheck = this.lastStalenessCheck;
+    return child;
+  }
 
   /**
    * Cross-repo group tools (CLI). Shares logic with MCP `group_*` handlers.
@@ -319,12 +341,33 @@ export class LocalBackend {
       });
     }
 
+    await this.applyRepoAccessFilter();
+
     // Prune repos that no longer exist in the registry
     for (const id of this.repos.keys()) {
       if (!freshIds.has(id)) {
         this.repos.delete(id);
         this.contextCache.delete(id);
         this.initializedRepos.delete(id);
+      }
+    }
+  }
+
+  private async canAccessRepo(handle: RepoHandle): Promise<boolean> {
+    if (!this.options.canAccessRepo) return true;
+    return !!(await this.options.canAccessRepo({
+      name: handle.name,
+      path: handle.repoPath,
+      remoteUrl: handle.remoteUrl,
+    }));
+  }
+
+  private async applyRepoAccessFilter(): Promise<void> {
+    if (!this.options.canAccessRepo) return;
+    for (const [id, handle] of [...this.repos]) {
+      if (!(await this.canAccessRepo(handle))) {
+        this.repos.delete(id);
+        this.contextCache.delete(id);
       }
     }
   }
@@ -369,7 +412,7 @@ export class LocalBackend {
       this.maybeWarnSiblingDrift(result).catch(() => {
         /* best-effort; never throw from resolveRepo */
       });
-      return result;
+      return await this.assertResolvedRepoAccess(result);
     }
 
     // Miss — refresh registry and try once more
@@ -377,7 +420,7 @@ export class LocalBackend {
     const retried = this.resolveRepoFromCache(repoParam);
     if (retried) {
       this.maybeWarnSiblingDrift(retried).catch(() => {});
-      return retried;
+      return await this.assertResolvedRepoAccess(retried);
     }
 
     // Still no match — throw with helpful message
@@ -437,6 +480,11 @@ export class LocalBackend {
     }
 
     return null; // Multiple repos, no param — ambiguous
+  }
+
+  private async assertResolvedRepoAccess(handle: RepoHandle): Promise<RepoHandle> {
+    if (await this.canAccessRepo(handle)) return handle;
+    throw new Error(`Repository access denied: ${handle.name}`);
   }
 
   // ─── Lazy LadybugDB Init ────────────────────────────────────────────

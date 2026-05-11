@@ -249,7 +249,9 @@ describe('production routes — rate-limit middleware wiring', () => {
   });
 
   it('auth endpoints are wired before repository data routes', () => {
+    expect(apiSource).toMatch(/app\.get\('\/api\/auth\/capabilities',/);
     expect(apiSource).toMatch(/app\.post\('\/api\/auth\/login',\s*createRouteLimiter\(/);
+    expect(apiSource).toMatch(/app\.post\('\/api\/auth\/register',\s*createRouteLimiter\(/);
     expect(apiSource).toMatch(/app\.post\('\/api\/auth\/logout',\s*requireAuth,/);
     expect(apiSource).toMatch(/app\.get\('\/api\/auth\/me',\s*requireAuth,/);
   });
@@ -269,6 +271,35 @@ describe('production routes — rate-limit middleware wiring', () => {
   it('admin-only routes are protected with requireAdmin', () => {
     expect(apiSource).toMatch(/app\.get\('\/api\/ai-settings',\s*requireAuth,\s*requireAdmin,/);
     expect(apiSource).toMatch(/app\.put\('\/api\/ai-settings',\s*requireAuth,\s*requireAdmin,/);
+    expect(apiSource).toMatch(
+      /app\.get\('\/api\/admin\/invitations',\s*requireAuth,\s*requireAdmin,/,
+    );
+    expect(apiSource).toMatch(
+      /app\.get\('\/api\/admin\/personal-tokens',\s*requireAuth,\s*requireAdmin,/,
+    );
+    expect(apiSource).toMatch(
+      /app\.delete\('\/api\/admin\/personal-tokens\/:id',\s*requireAuth,\s*requireAdmin,/,
+    );
+    expect(apiSource).toMatch(
+      /app\.post\('\/api\/admin\/invitations',\s*requireAuth,\s*requireAdmin,/,
+    );
+    expect(apiSource).toMatch(
+      /app\.patch\('\/api\/admin\/invitations\/:id',\s*requireAuth,\s*requireAdmin,/,
+    );
+    expect(apiSource).toMatch(
+      /app\.get\('\/api\/admin\/audit-events',\s*requireAuth,\s*requireAdmin,/,
+    );
+  });
+
+  it('personal token routes require authentication', () => {
+    expect(apiSource).toMatch(/app\.get\('\/api\/personal-tokens',\s*requireAuth,/);
+    expect(apiSource).toMatch(/app\.post\('\/api\/personal-tokens',\s*requireAuth,/);
+    expect(apiSource).toMatch(/app\.delete\('\/api\/personal-tokens\/:id',\s*requireAuth,/);
+  });
+
+  it('authentication can resolve personal tokens from bearer or x-gitnexus-token headers', () => {
+    expect(apiSource).toMatch(/getRequestToken\(req\.headers/);
+    expect(apiSource).toMatch(/authStore\.getPersonalToken/);
   });
 
   it('analysis and embedding job inspection routes require authentication', () => {

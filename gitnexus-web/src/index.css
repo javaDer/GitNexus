@@ -49,6 +49,27 @@
   --shadow-glow-soft: 0 0 40px rgba(124, 58, 237, 0.15);
 }
 
+:root[data-theme='light'] {
+  --color-void: #f5f7fb;
+  --color-deep: #ffffff;
+  --color-surface: #ffffff;
+  --color-elevated: #eef2f7;
+  --color-hover: #e5eaf2;
+
+  --color-border-subtle: #d8dee9;
+  --color-border-default: #b9c3d1;
+
+  --color-text-primary: #111827;
+  --color-text-secondary: #475569;
+  --color-text-muted: #64748b;
+
+  --color-accent: #5b21b6;
+  --color-accent-dim: #4c1d95;
+
+  --shadow-glow: 0 0 16px rgba(91, 33, 182, 0.22);
+  --shadow-glow-soft: 0 0 32px rgba(91, 33, 182, 0.1);
+}
+
 /* Keyframes */
 @keyframes breathe {
   0%,

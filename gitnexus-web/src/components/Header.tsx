@@ -10,6 +10,8 @@ import {
   Trash2,
   RefreshCw,
   Loader2,
+  Moon,
+  Sun,
 } from '@/lib/lucide-icons';
 import { useAppState } from '../hooks/useAppState';
 import {
@@ -20,6 +22,7 @@ import {
   type BackendRepo,
   type JobProgress,
 } from '../services/backend-client';
+import { applyTheme, loadTheme, setStoredTheme, toggleTheme, type AppTheme } from '../theme';
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { GraphNode } from 'gitnexus-shared';
 import { EmbeddingStatus } from './EmbeddingStatus';
@@ -73,6 +76,7 @@ export const Header = ({
   const repoDropdownRef = useRef<HTMLDivElement>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [theme, setTheme] = useState<AppTheme>(loadTheme);
   const searchRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -110,6 +114,11 @@ export const Header = ({
       reanalyzeSseRef.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    applyTheme(theme);
+    setStoredTheme(theme);
+  }, [theme]);
 
   // Keyboard shortcut (Cmd+K / Ctrl+K)
   useEffect(() => {
@@ -458,6 +467,13 @@ export const Header = ({
         <EmbeddingStatus />
 
         {/* Icon buttons */}
+        <button
+          onClick={() => setTheme((current) => toggleTheme(current))}
+          className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-hover hover:text-text-primary"
+          title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        >
+          {theme === 'dark' ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
+        </button>
         <button
           onClick={() => setSettingsPanelOpen(true)}
           className="flex h-9 w-9 cursor-pointer items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-hover hover:text-text-primary"

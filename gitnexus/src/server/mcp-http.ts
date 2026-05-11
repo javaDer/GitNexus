@@ -16,6 +16,7 @@ import { createMCPServer } from '../mcp/server.js';
 import type { LocalBackend } from '../mcp/local/local-backend.js';
 import { randomUUID } from 'crypto';
 import { logger } from '../core/logger.js';
+import { getRequestToken, type AuthStore, type AuthUser } from './auth.js';
 
 interface MCPSession {
   server: Server;
@@ -28,8 +29,30 @@ const SESSION_TTL_MS = 30 * 60 * 1000;
 /** Cleanup sweep runs every 5 minutes */
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
-export function mountMCPEndpoints(app: Express, backend: LocalBackend): () => Promise<void> {
+export function mountMCPEndpoints(
+  app: Express,
+  backend: LocalBackend,
+  authStore?: AuthStore,
+): () => Promise<void> {
   const sessions = new Map<string, MCPSession>();
+
+  const authenticate = async (req: Request): Promise<AuthUser | null> => {
+    if (!authStore) return null;
+    const requestToken = getRequestToken(req.headers);
+    if (!requestToken) return null;
+    return (
+      (await authStore.getSession(requestToken.token)) ??
+      (await authStore.getPersonalToken(requestToken.token))
+    );
+  };
+
+  const backendForUser = (user: AuthUser | null): LocalBackend => {
+    if (!authStore || !user) return backend;
+    return backend.withAccessFilter(async ({ path, remoteUrl }) => {
+      const keys = [remoteUrl, path].filter(Boolean) as string[];
+      return authStore.userCanAccessAnyRepoKey(user.id, keys);
+    });
+  };
 
   // Periodic cleanup of idle sessions (guards against network drops)
   const cleanupTimer = setInterval(() => {
@@ -48,6 +71,17 @@ export function mountMCPEndpoints(app: Express, backend: LocalBackend): () => Pr
   }
 
   const handleMcpRequest = async (req: Request, res: Response) => {
+    const capabilities = authStore ? await authStore.getCapabilities() : null;
+    const user = await authenticate(req);
+    if (capabilities?.personalTokensEnabled && !user) {
+      res.status(401).json({
+        jsonrpc: '2.0',
+        error: { code: -32001, message: 'GitNexus MCP authentication required.' },
+        id: null,
+      });
+      return;
+    }
+
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
     if (sessionId && sessions.has(sessionId)) {
@@ -67,7 +101,7 @@ export function mountMCPEndpoints(app: Express, backend: LocalBackend): () => Pr
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
       });
-      const server = createMCPServer(backend);
+      const server = createMCPServer(backendForUser(user));
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
 

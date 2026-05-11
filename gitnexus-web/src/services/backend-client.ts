@@ -34,6 +34,46 @@ export interface AuthUser {
   role: UserRole;
 }
 
+export interface AuthCapabilities {
+  storage: 'sqlite' | 'postgres';
+  registrationEnabled: boolean;
+  invitationManagementEnabled: boolean;
+  personalTokensEnabled: boolean;
+  auditEnabled: boolean;
+}
+
+export interface PersonalTokenInfo {
+  id: string | number;
+  label: string;
+  createdAt: number;
+  lastUsedAt?: number | null;
+  revokedAt?: number | null;
+  userId?: number;
+  username?: string;
+}
+
+export interface CreatedPersonalToken extends PersonalTokenInfo {
+  token: string;
+}
+
+export interface InvitationCodeInfo {
+  id: string | number;
+  code?: string;
+  enabled: boolean;
+  usedAt?: number | null;
+  createdAt: number;
+  createdBy?: number | null;
+  usedBy?: number | null;
+}
+
+export interface AuditEventInfo {
+  id: string | number;
+  actorUserId?: number | null;
+  eventType: string;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+}
+
 export interface EnrichedSearchResult {
   filePath: string;
   score: number;
@@ -456,6 +496,12 @@ export const fetchServerInfo = async (): Promise<ServerInfo> => {
   return response.json() as Promise<ServerInfo>;
 };
 
+export const fetchAuthCapabilities = async (): Promise<AuthCapabilities> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/auth/capabilities`);
+  await assertOk(response);
+  return response.json() as Promise<AuthCapabilities>;
+};
+
 export const login = async (
   username: string,
   password: string,
@@ -473,6 +519,96 @@ export const login = async (
   };
   setAuthToken(data.token);
   return data;
+};
+
+export const register = async (
+  username: string,
+  password: string,
+  invitationCode: string,
+): Promise<{ token: string; user: AuthUser; expiresAt: number }> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, invitationCode }),
+  });
+  await assertOk(response);
+  const data = (await response.json()) as {
+    token: string;
+    user: AuthUser;
+    expiresAt: number;
+  };
+  setAuthToken(data.token);
+  return data;
+};
+
+export const fetchPersonalTokens = async (): Promise<PersonalTokenInfo[]> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/personal-tokens`);
+  await assertOk(response);
+  const data = (await response.json()) as { tokens: PersonalTokenInfo[] };
+  return data.tokens;
+};
+
+export const createPersonalToken = async (label: string): Promise<CreatedPersonalToken> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/personal-tokens`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label }),
+  });
+  await assertOk(response);
+  return response.json() as Promise<CreatedPersonalToken>;
+};
+
+export const revokePersonalToken = async (id: string): Promise<void> => {
+  const response = await fetchWithTimeout(
+    `${_backendUrl}/api/personal-tokens/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+  );
+  await assertOk(response);
+};
+
+export const fetchAdminPersonalTokens = async (): Promise<PersonalTokenInfo[]> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/admin/personal-tokens`);
+  await assertOk(response);
+  const data = (await response.json()) as { tokens: PersonalTokenInfo[] };
+  return data.tokens;
+};
+
+export const revokeAdminPersonalToken = async (id: string): Promise<void> => {
+  const response = await fetchWithTimeout(
+    `${_backendUrl}/api/admin/personal-tokens/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+  );
+  await assertOk(response);
+};
+
+export const fetchInvitations = async (): Promise<InvitationCodeInfo[]> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/admin/invitations`);
+  await assertOk(response);
+  const data = (await response.json()) as { invitations: InvitationCodeInfo[] };
+  return data.invitations;
+};
+
+export const createInvitation = async (): Promise<InvitationCodeInfo> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/admin/invitations`, {
+    method: 'POST',
+  });
+  await assertOk(response);
+  return response.json() as Promise<InvitationCodeInfo>;
+};
+
+export const disableInvitation = async (id: string): Promise<void> => {
+  const response = await fetchWithTimeout(
+    `${_backendUrl}/api/admin/invitations/${encodeURIComponent(id)}`,
+    { method: 'PATCH' },
+  );
+  await assertOk(response);
+};
+
+export const fetchAuditEvents = async (): Promise<AuditEventInfo[]> => {
+  const response = await fetchWithTimeout(`${_backendUrl}/api/admin/audit-events`);
+  await assertOk(response);
+  const data = (await response.json()) as { events: AuditEventInfo[] };
+  return data.events;
 };
 
 export const logout = async (): Promise<void> => {

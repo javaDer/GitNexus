@@ -1,0 +1,34 @@
+[
+  {
+    "name": "print-node",
+    "path": "/Users/zhaofa/.gitnexus/repos/print-node",
+    "storagePath": "/Users/zhaofa/.gitnexus/repos/print-node/.gitnexus",
+    "indexedAt": "2026-05-09T07:15:22.997Z",
+    "lastCommit": "8230909a5366ff7057637252a3455ebec8a797e1",
+    "remoteUrl": "https://code.geelib.qihoo.net:11443/tob-frontend/print-node",
+    "stats": {
+      "files": 50,
+      "nodes": 768,
+      "edges": 857,
+      "communities": 43,
+      "processes": 2,
+      "embeddings": 0
+    }
+  },
+  {
+    "name": "portal-dotnet",
+    "path": "/Users/zhaofa/.gitnexus/repos/portal-dotnet",
+    "storagePath": "/Users/zhaofa/.gitnexus/repos/portal-dotnet/.gitnexus",
+    "indexedAt": "2026-05-10T00:46:22.725Z",
+    "lastCommit": "7eec56d232d6c780eef30f412add01edd651de15",
+    "remoteUrl": "https://code.geelib.qihoo.net:10443/CRM/portal-dotnet",
+    "stats": {
+      "files": 544,
+      "nodes": 9657,
+      "edges": 21185,
+      "communities": 320,
+      "processes": 43,
+      "embeddings": 0
+    }
+  }
+]

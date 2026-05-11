@@ -40,6 +40,7 @@ import {
   buildAuthenticatedGitUrl,
   createAuthStore,
   getBearerToken,
+  getRequestToken,
   normalizeRepoKey,
   redactGitUrl,
   type AuthStore,
@@ -562,12 +563,14 @@ const requestedRepo = (req: express.Request): string | undefined => {
 
 const createAuthMiddleware = (authStore: AuthStore) => {
   const requireAuth: express.RequestHandler = async (req, res, next) => {
-    const token = getBearerToken(req.header('authorization'));
-    if (!token) {
+    const requestToken = getRequestToken(req.headers);
+    if (!requestToken) {
       res.status(401).json({ error: 'Login required' });
       return;
     }
-    const user = await authStore.getSession(token);
+    const user =
+      (await authStore.getSession(requestToken.token)) ??
+      (await authStore.getPersonalToken(requestToken.token));
     if (!user) {
       res.status(401).json({ error: 'Invalid or expired session' });
       return;
@@ -755,9 +758,9 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
   // Initialize MCP backend (multi-repo, shared across all MCP sessions)
   const backend = new LocalBackend();
   await backend.init();
-  const cleanupMcp = mountMCPEndpoints(app, backend);
   const jobManager = new JobManager();
   const authStore = await createAuthStore();
+  const cleanupMcp = mountMCPEndpoints(app, backend, authStore);
   const { requireAuth, requireAdmin, requireRepoAccess } = createAuthMiddleware(authStore);
 
   // Shared repo lock — prevents concurrent analyze + embed on the same repo path,
@@ -920,6 +923,10 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
     });
   });
 
+  app.get('/api/auth/capabilities', async (_req, res) => {
+    res.json(await authStore.getCapabilities());
+  });
+
   app.post('/api/auth/login', createRouteLimiter({ limit: 20 }), async (req, res) => {
     const username = typeof req.body?.username === 'string' ? req.body.username : '';
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
@@ -932,6 +939,24 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
     res.json({ token: session.token, expiresAt: session.expiresAt, user });
   });
 
+  app.post('/api/auth/register', createRouteLimiter({ limit: 20 }), async (req, res) => {
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const invitationCode =
+      typeof req.body?.invitationCode === 'string' ? req.body.invitationCode.trim() : '';
+    if (!username || !password || !invitationCode) {
+      res.status(400).json({ error: 'Username, password, and invitation code are required' });
+      return;
+    }
+    try {
+      const user = await authStore.registerUser({ username, password, invitationCode });
+      const session = await authStore.createSession(user.id);
+      res.status(201).json({ token: session.token, expiresAt: session.expiresAt, user });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Registration failed' });
+    }
+  });
+
   app.post('/api/auth/logout', requireAuth, async (req, res) => {
     const token = getBearerToken(req.header('authorization'));
     if (token) await authStore.deleteSession(token);
@@ -940,6 +965,67 @@ export const createServer = async (port: number, host: string = '127.0.0.1') => 
 
   app.get('/api/auth/me', requireAuth, (req, res) => {
     res.json({ user: req.user });
+  });
+
+  app.get('/api/personal-tokens', requireAuth, async (req, res) => {
+    res.json({ tokens: await authStore.listPersonalTokens(req.user!.id) });
+  });
+
+  app.post(
+    '/api/personal-tokens',
+    requireAuth,
+    createRouteLimiter({ limit: 20 }),
+    async (req, res) => {
+      const label = typeof req.body?.label === 'string' ? req.body.label.trim() : '';
+      if (!label) {
+        res.status(400).json({ error: 'Token label is required' });
+        return;
+      }
+      try {
+        const token = await authStore.createPersonalToken(req.user!.id, label);
+        res.status(201).json(token);
+      } catch (err: any) {
+        res.status(400).json({ error: err.message || 'Failed to create personal token' });
+      }
+    },
+  );
+
+  app.delete('/api/personal-tokens/:id', requireAuth, async (req, res) => {
+    await authStore.revokePersonalToken(req.user!.id, req.params.id);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/admin/personal-tokens', requireAuth, requireAdmin, async (_req, res) => {
+    res.json({ tokens: await authStore.listAllPersonalTokens() });
+  });
+
+  app.delete('/api/admin/personal-tokens/:id', requireAuth, requireAdmin, async (req, res) => {
+    await authStore.revokeUserPersonalToken(req.user!.id, req.params.id);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/admin/invitations', requireAuth, requireAdmin, async (_req, res) => {
+    res.json({ invitations: await authStore.listInvitationCodes() });
+  });
+
+  app.post('/api/admin/invitations', requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const invitation = await authStore.createInvitationCode(req.user!.id);
+      res.status(201).json(invitation);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || 'Failed to create invitation code' });
+    }
+  });
+
+  app.patch('/api/admin/invitations/:id', requireAuth, requireAdmin, async (req, res) => {
+    await authStore.disableInvitationCode(req.user!.id, req.params.id);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/admin/audit-events', requireAuth, requireAdmin, async (req, res) => {
+    const rawLimit = Number(req.query.limit ?? 100);
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 100;
+    res.json({ events: await authStore.listAuditEvents(limit) });
   });
 
   app.get('/api/ai-settings', requireAuth, requireAdmin, async (_req, res) => {
