@@ -8,6 +8,22 @@ import EdgeCurveProgram from '@sigma/edge-curve';
 import { SigmaNodeAttributes, SigmaEdgeAttributes } from '../lib/graph-adapter';
 import type { NodeAnimation } from './useAppState';
 import type { EdgeType } from '../lib/constants';
+
+const sigmaThemeColors = () => {
+  const isLight = document.documentElement.dataset.theme === 'light';
+  return isLight
+    ? {
+        label: '#111827',
+        hoverBackground: 'rgba(255, 255, 255, 0.94)',
+        hoverText: '#111827',
+      }
+    : {
+        label: '#e4e4ed',
+        hoverBackground: '#12121c',
+        hoverText: '#f5f5f7',
+      };
+};
+
 // Helper: Parse hex color to RGB
 const hexToRgb = (hex: string): { r: number; g: number; b: number } => {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
@@ -156,6 +172,17 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
     options.visibleEdgeTypes,
   ]);
 
+  useEffect(() => {
+    const handleThemeChange = () => {
+      const colors = sigmaThemeColors();
+      sigmaRef.current?.setSetting('labelColor', { color: colors.label });
+      sigmaRef.current?.refresh();
+    };
+    document.addEventListener('gitnexus-theme-change', handleThemeChange);
+    handleThemeChange();
+    return () => document.removeEventListener('gitnexus-theme-change', handleThemeChange);
+  }, []);
+
   // Animation loop for node effects
   useEffect(() => {
     if (!options.animatedNodes || options.animatedNodes.size === 0) {
@@ -204,12 +231,13 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
     const graph = new Graph<SigmaNodeAttributes, SigmaEdgeAttributes>();
     graphRef.current = graph;
 
+    const themeColors = sigmaThemeColors();
     const sigma = new Sigma(graph, containerRef.current, {
       renderLabels: true,
       labelFont: 'JetBrains Mono, monospace',
       labelSize: 11,
       labelWeight: '500',
-      labelColor: { color: '#e4e4ed' },
+      labelColor: { color: themeColors.label },
       labelRenderedSizeThreshold: 8,
       labelDensity: 0.1,
       labelGridCellSize: 70,
@@ -243,8 +271,8 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
         const width = textWidth + paddingX * 2;
         const radius = 4;
 
-        // Dark background pill
-        context.fillStyle = '#12121c';
+        const hoverColors = sigmaThemeColors();
+        context.fillStyle = hoverColors.hoverBackground;
         context.beginPath();
         context.roundRect(x - width / 2, y - height / 2, width, height, radius);
         context.fill();
@@ -254,8 +282,7 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
         context.lineWidth = 2;
         context.stroke();
 
-        // Label text - light color
-        context.fillStyle = '#f5f5f7';
+        context.fillStyle = hoverColors.hoverText;
         context.textAlign = 'center';
         context.textBaseline = 'middle';
         context.fillText(label, x, y);

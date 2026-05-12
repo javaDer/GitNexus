@@ -14,8 +14,8 @@ afterEach(() => {
 });
 
 describe('theme helpers', () => {
-  it('defaults to dark when no preference is stored', () => {
-    expect(loadTheme()).toBe('dark');
+  it('defaults to light when no preference is stored', () => {
+    expect(loadTheme()).toBe('light');
   });
 
   it('persists and applies a light theme', () => {

@@ -118,6 +118,7 @@ export const Header = ({
   useEffect(() => {
     applyTheme(theme);
     setStoredTheme(theme);
+    document.dispatchEvent(new CustomEvent('gitnexus-theme-change', { detail: theme }));
   }, [theme]);
 
   // Keyboard shortcut (Cmd+K / Ctrl+K)

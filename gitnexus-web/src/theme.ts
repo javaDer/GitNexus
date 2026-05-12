@@ -15,7 +15,7 @@ export const setStoredTheme = (theme: AppTheme): void => {
   localStorage.setItem(THEME_STORAGE_KEY, theme);
 };
 
-export const loadTheme = (): AppTheme => getStoredTheme() ?? 'dark';
+export const loadTheme = (): AppTheme => getStoredTheme() ?? 'light';
 
 export const applyTheme = (theme: AppTheme): void => {
   if (typeof document === 'undefined') return;
