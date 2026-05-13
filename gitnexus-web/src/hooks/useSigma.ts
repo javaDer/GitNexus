@@ -14,13 +14,21 @@ const sigmaThemeColors = () => {
   return isLight
     ? {
         label: '#111827',
+        defaultEdge: '#94a3b8',
         hoverBackground: 'rgba(255, 255, 255, 0.94)',
         hoverText: '#111827',
+        dimBackground: { r: 245, g: 247, b: 251 },
+        edgeOpacity: 0.26,
+        edgeSizeScale: 0.55,
       }
     : {
         label: '#e4e4ed',
+        defaultEdge: '#2a2a3a',
         hoverBackground: '#12121c',
         hoverText: '#f5f5f7',
+        dimBackground: { r: 18, g: 18, b: 28 },
+        edgeOpacity: 1,
+        edgeSizeScale: 1,
       };
 };
 
@@ -49,14 +57,14 @@ const rgbToHex = (r: number, g: number, b: number): string => {
   );
 };
 
-// Dim a color by mixing with dark background (keeps color hint)
+// Dim a color by mixing with the active theme background (keeps color hint)
 const dimColor = (hex: string, amount: number): string => {
   const rgb = hexToRgb(hex);
-  const darkBg = { r: 18, g: 18, b: 28 }; // #12121c - dark background
+  const bg = sigmaThemeColors().dimBackground;
   return rgbToHex(
-    darkBg.r + (rgb.r - darkBg.r) * amount,
-    darkBg.g + (rgb.g - darkBg.g) * amount,
-    darkBg.b + (rgb.b - darkBg.b) * amount,
+    bg.r + (rgb.r - bg.r) * amount,
+    bg.g + (rgb.g - bg.g) * amount,
+    bg.b + (rgb.b - bg.b) * amount,
   );
 };
 
@@ -176,6 +184,7 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
     const handleThemeChange = () => {
       const colors = sigmaThemeColors();
       sigmaRef.current?.setSetting('labelColor', { color: colors.label });
+      sigmaRef.current?.setSetting('defaultEdgeColor', colors.defaultEdge);
       sigmaRef.current?.refresh();
     };
     document.addEventListener('gitnexus-theme-change', handleThemeChange);
@@ -243,7 +252,7 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
       labelGridCellSize: 70,
 
       defaultNodeColor: '#6b7280',
-      defaultEdgeColor: '#2a2a3a',
+      defaultEdgeColor: themeColors.defaultEdge,
 
       defaultEdgeType: 'curved',
       edgeProgramClasses: {
@@ -419,6 +428,7 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
 
       edgeReducer: (edge, data) => {
         const res = { ...data };
+        const themeColors = sigmaThemeColors();
 
         // Check edge type visibility first
         const visibleTypes = visibleEdgeTypesRef.current;
@@ -484,8 +494,11 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
               res.zIndex = 0;
             }
           }
+          return res;
         }
 
+        res.color = dimColor(data.color, themeColors.edgeOpacity);
+        res.size = Math.max(0.15, (data.size || 1) * themeColors.edgeSizeScale);
         return res;
       },
     });

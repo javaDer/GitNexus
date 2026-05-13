@@ -7,14 +7,17 @@ ARG TARGETPLATFORM
 # gitnexus/Dockerfile.test so all images bootstrap the same npm.
 ARG NPM_VERSION=11.14.1
 ARG NPM_REGISTRY=https://registry.npmmirror.com/
+ARG NODE_IMAGE=library/node:22-bookworm-slim
+ARG GITNEXUS_SKIP_OPTIONAL_GRAMMARS=1
 
 # -- Builder -----------------------------------------------------------
 # Native modules (tree-sitter-*, onnxruntime-node, node-gyp builds for
 # tree-sitter-proto / tree-sitter-swift) require python3 + a C/C++ toolchain.
 # node:22-bookworm-slim
-FROM library/node:22-bookworm-slim AS builder
+FROM ${NODE_IMAGE} AS builder
 ARG NPM_VERSION
 ARG NPM_REGISTRY
+ARG GITNEXUS_SKIP_OPTIONAL_GRAMMARS
 
 WORKDIR /app
 
@@ -22,31 +25,73 @@ RUN npx --yes npm@${NPM_VERSION} install -g npm@${NPM_VERSION}
 
 ENV npm_config_audit=false \
     npm_config_fund=false \
-    npm_config_registry=${NPM_REGISTRY}
+    npm_config_registry=${NPM_REGISTRY} \
+    ONNXRUNTIME_NODE_INSTALL=skip \
+    GITNEXUS_SKIP_OPTIONAL_GRAMMARS=${GITNEXUS_SKIP_OPTIONAL_GRAMMARS}
 
 # Toolchain for node-gyp / native builds.
 # Use Aliyun mirror for apt to speed up downloads in China.
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
     apt-get update && apt-get install -y --no-install-recommends python3 make g++ git curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# Build gitnexus-shared first - gitnexus depends on it as a workspace.
+# Copy dependency manifests first so Docker can reuse the expensive npm layer
+# across source-only edits.
 COPY gitnexus-shared/package.json gitnexus-shared/package-lock.json ./gitnexus-shared/
-COPY gitnexus-shared ./gitnexus-shared
+COPY gitnexus/package.json gitnexus/package-lock.json ./gitnexus/
+COPY gitnexus/vendor ./gitnexus/vendor
 
-# Copy the full gitnexus package before installing - `npm ci` triggers
-# `postinstall` (patches tree-sitter-swift, builds the vendored
-# tree-sitter-proto) and `prepare` (compiles TypeScript via scripts/build.js),
-# both of which need the source tree.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    --mount=type=cache,target=/root/.cache/node-gyp,sharing=locked \
+    rm -f gitnexus-shared/tsconfig.tsbuildinfo gitnexus/tsconfig.tsbuildinfo && \
+    npm ci --prefix gitnexus-shared \
+        --registry=${NPM_REGISTRY} \
+        --prefer-offline \
+        --no-audit \
+        --no-fund && \
+    GITNEXUS_SKIP_WEB_BUILD=1 npm ci --prefix gitnexus \
+        --registry=${NPM_REGISTRY} \
+        --prefer-offline \
+        --no-audit \
+        --no-fund \
+        --ignore-scripts \
+        --legacy-peer-deps && \
+    npm cache verify
+
+COPY gitnexus-shared ./gitnexus-shared
 COPY gitnexus ./gitnexus
 
-RUN --mount=type=cache,target=/root/.npm \
-    rm -f gitnexus-shared/tsconfig.tsbuildinfo gitnexus/tsconfig.tsbuildinfo && \
-    GITNEXUS_SKIP_WEB_BUILD=1 npm ci --prefix gitnexus && \
-    npm prune --prefix gitnexus --omit=dev --ignore-scripts
+WORKDIR /app/gitnexus
+
+# Re-run only the native install scripts required at runtime. Optional Dart /
+# Proto grammars are controlled by GITNEXUS_SKIP_OPTIONAL_GRAMMARS above.
+RUN rm -f ../gitnexus-shared/tsconfig.tsbuildinfo tsconfig.tsbuildinfo && \
+    npm rebuild \
+        @ladybugdb/core \
+        onnxruntime-node \
+        sharp \
+        tree-sitter \
+        tree-sitter-c \
+        tree-sitter-c-sharp \
+        tree-sitter-cpp \
+        tree-sitter-go \
+        tree-sitter-java \
+        tree-sitter-javascript \
+        tree-sitter-php \
+        tree-sitter-python \
+        tree-sitter-ruby \
+        tree-sitter-rust \
+        tree-sitter-swift \
+        tree-sitter-typescript && \
+    GITNEXUS_SKIP_WEB_BUILD=1 npm run build && \
+    npm prune --omit=dev --ignore-scripts && \
+    node -e "const fs=require('fs'), path=require('path'); const keep=new Set(['linux/x64','linux/arm64']); const base='node_modules/onnxruntime-node/bin/napi-v6'; for (const platform of fs.readdirSync(base)) { for (const arch of fs.readdirSync(path.join(base, platform))) { const rel=platform+'/'+arch; if (!keep.has(rel)) fs.rmSync(path.join(base, platform, arch), {recursive:true, force:true}); } }" && \
+    node -e "const fs=require('fs'); const keep = process.arch === 'arm64' ? '@esbuild/linux-arm64' : '@esbuild/linux-x64'; const base='node_modules/@esbuild'; if (fs.existsSync(base)) for (const name of fs.readdirSync(base)) if ('@esbuild/'+name !== keep) fs.rmSync(base+'/'+name, {recursive:true, force:true});"
+
+WORKDIR /app
 
 # -- Runtime -----------------------------------------------------------
 # node:22-bookworm-slim
-FROM library/node:22-bookworm-slim AS runtime
+FROM ${NODE_IMAGE} AS runtime
 
 # curl for the healthcheck; git so `gitnexus` can clone repos at runtime.
 # Use Aliyun mirror for apt to speed up downloads in China.

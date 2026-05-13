@@ -8,8 +8,10 @@ ARG NPM_VERSION=11.14.1
 ARG NPM_REGISTRY=https://registry.npmmirror.com/
 ARG VITE_GITNEXUS_BACKEND_URL=http://localhost:4747
 
+ARG NODE_IMAGE=node:22-bookworm-slim
+
 # node:22-bookworm-slim
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:9f6d5975c7dca860947d3915877f85607946403fc55349f39b4bc3688448bb6e AS builder
+FROM ${NODE_IMAGE} AS builder
 ARG NPM_VERSION
 ARG NPM_REGISTRY
 ARG VITE_GITNEXUS_BACKEND_URL
@@ -24,21 +26,23 @@ ENV npm_config_audit=false \
     VITE_GITNEXUS_BACKEND_URL=${VITE_GITNEXUS_BACKEND_URL}
 
 COPY gitnexus-shared/package.json gitnexus-shared/package-lock.json ./gitnexus-shared/
-RUN --mount=type=cache,target=/root/.npm npm ci --prefix gitnexus-shared
-
-COPY gitnexus-shared ./gitnexus-shared
-RUN npm run build --prefix gitnexus-shared
+COPY gitnexus-web/package.json gitnexus-web/package-lock.json ./gitnexus-web/
 
 COPY gitnexus/package.json ./gitnexus/
 
-COPY gitnexus-web/package.json gitnexus-web/package-lock.json ./gitnexus-web/
-RUN --mount=type=cache,target=/root/.npm npm ci --prefix gitnexus-web
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --prefix gitnexus-shared && \
+    npm ci --prefix gitnexus-web && \
+    npm cache verify
+
+COPY gitnexus-shared ./gitnexus-shared
+RUN npm run build --prefix gitnexus-shared
 
 COPY gitnexus-web ./gitnexus-web
 RUN npm run build --prefix gitnexus-web
 
 # node:22-bookworm-slim
-FROM node:22-bookworm-slim@sha256:9f6d5975c7dca860947d3915877f85607946403fc55349f39b4bc3688448bb6e AS runtime
+FROM ${NODE_IMAGE} AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/local/lib/node_modules/npm \
